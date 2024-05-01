@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<title>Steppin' Stones</title>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<link rel="icon" href="favicon.png" type="image/png" />
+<style>
+  /* Reset CSS to ensure the canvas fits perfectly */
+  body,
+  html {
+    margin: 0;
+    padding: 0;
+    overflow: hidden; /* Avoid scrollbars */
+  }
+  canvas {
+    display: block; /* Remove default margin/padding of canvas */
+  }
+</style>
+<html>
+  <head>
+    <!-- <script src="pixi.js"></script> -->
+    <script src="pixi.min.js"></script>
+  </head>
+  <body>
+    <script type="module">
+      import {
+        screenToGrid,
+        buildGrid,
+        placeValue,
+        addUndoButton,
+        rebuildGraphics,
+      } from "./helpers.js";
+
+      const game = {
+        state: {
+          size: 30, // size of board in each direction
+          level: 1, // number of ones to place (first one is always placed)
+          ones: [], // first one will be placed at origin [0.0]
+          seq: [], // placement of 2, 3, 4, etc
+        },
+        board: {}, // "1,-2" => { value, txt: PIXI.Text }
+        cellSize: 20,
+      };
+
+      const app = new PIXI.Application();
+      // globalThis.__PIXI_APP__ = app;
+
+      // add canvas that dynamically resizes to window
+      await app.init({ resizeTo: window });
+      document.body.appendChild(app.canvas);
+
+      // disable right click context menu
+      app.canvas.addEventListener("contextmenu", (event) =>
+        event.preventDefault()
+      );
+
+      // load ubuntu monospace font
+      PIXI.Assets.addBundle("fonts", {
+        ubuntu: "font/Ubuntu_Mono/UbuntuMono-Bold.ttf",
+        ShinyCrystal: "font/ShinyCrystal.ttf",
+      });
+      await PIXI.Assets.loadBundle("fonts");
+
+      // determine cell size
+      game.cellSize = Math.min(app.screen.width, app.screen.height) / 10;
+
+      // world container for panning
+      const world = new PIXI.Container();
+      world.position.set(app.screen.width / 2, app.screen.height / 2);
+      app.stage.addChild(world);
+
+      // generate grid cells
+      world.addChild(buildGrid(game));
+
+      // add initial one value to board origin
+      world.addChild(...placeValue(game, 0, 0));
+
+      // set when dragging
+      let dragging = false;
+      let dragPos = null;
+
+      // Handle pointer events
+      world.eventMode = "static";
+      world.on("pointerdown", (event) => {
+        // maybe start panning
+        dragPos = { x: event.client.x, y: event.client.y };
+      });
+      world.on("pointerup", (event) => {
+        if (!dragging) {
+          // try placing a value
+          const [x, y] = screenToGrid(
+            event.global.x,
+            event.global.y,
+            world,
+            game.cellSize
+          );
+          const graphics = placeValue(game, x, y);
+          if (graphics) {
+            world.addChild(...graphics);
+          }
+        }
+
+        // stop panning
+        dragging = false;
+        dragPos = null;
+      });
+      world.on("pointermove", (event) => {
+        if (dragPos) {
+          // pan world
+          dragging = true;
+          world.position.x += event.client.x - dragPos.x;
+          world.position.y += event.client.y - dragPos.y;
+          dragPos = { x: event.client.x, y: event.client.y };
+        }
+      });
+
+      addUndoButton(game, app.stage);
+
+      window.addEventListener("resize", () => {
+        // remove all graphics on resize
+        while (world.children.length > 0) {
+          const child = world.removeChildAt(world.children.length - 1);
+          child.destroy({ children: true });
+        }
+
+        // determine new cell size
+        game.cellSize = Math.min(app.screen.width, app.screen.height) / 10;
+
+        // regenerate grid cells
+        world.addChild(buildGrid(game));
+        world.addChild(...rebuildGraphics(game));
+      });
+    </script>
+  </body>
+</html>
