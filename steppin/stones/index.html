@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<title>Steppin' Stones</title>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<link rel="icon" href="../favicon.png" type="image/png" />
+<style>
+  /* Reset CSS to ensure the canvas fits perfectly */
+  body,
+  html {
+    margin: 0;
+    padding: 0;
+    overflow: hidden; /* Avoid scrollbars */
+  }
+  canvas {
+    display: block; /* Remove default margin/padding of canvas */
+  }
+</style>
+<html>
+  <head>
+    <script src="pixi.js"></script>
+    <!-- <script src="pixi.min.js"></script> -->
+  </head>
+  <body>
+    <script type="module">
+      import {
+        screenToGrid,
+        buildGrid,
+        placeValue,
+        makeButton,
+        rebuildGraphics,
+        undoMove,
+        ensureInt,
+        makeGameFromState,
+      } from "./helpers.js";
+
+      // get ?level=x query parameter
+      const queryParams = new URLSearchParams(window.location.search);
+      const level = ensureInt(+queryParams.get("level"), 1, 10);
+
+      // create PIXI application
+      const app = new PIXI.Application();
+      globalThis.__PIXI_APP__ = app;
+
+      // add canvas that dynamically resizes to window
+      await app.init({ background: 0x909090, resizeTo: window });
+      document.body.appendChild(app.canvas);
+
+      // disable right click context menu
+      app.canvas.addEventListener("contextmenu", (event) =>
+        event.preventDefault()
+      );
+
+      // load fonts
+      PIXI.Assets.addBundle("fonts", {
+        ubuntu: "../font/Ubuntu_Mono/UbuntuMono-Bold.ttf",
+        ShinyCrystal: "../font/ShinyCrystal.ttf",
+      });
+      await PIXI.Assets.loadBundle("fonts");
+
+      function createGameWorld(gameState, app) {
+        // world container for game board
+        const world = new PIXI.Container();
+        world.position.set(app.screen.width / 2, app.screen.height / 2);
+
+        // determine cell size, create game form state
+        const cellSize = Math.min(app.screen.width, app.screen.height) / 10;
+        const [game, gameGraphics] = makeGameFromState(gameState, cellSize);
+
+        // generate grid cells, add game graphics
+        world.addChild(buildGrid(game));
+        world.addChild(...gameGraphics);
+
+        // handle pointer events
+        let dragging = false;
+        let dragStart = null;
+        let dragPos = null;
+        world.eventMode = "static";
+        world.on("pointerdown", (event) => {
+          // maybe start panning
+          dragPos = dragStart = { x: event.client.x, y: event.client.y };
+        });
+        world.on("pointerup", (event) => {
+          if (!dragging) {
+            // try placing a stone
+            const [x, y] = screenToGrid(
+              event.global.x,
+              event.global.y,
+              world,
+              game.cellSize
+            );
+            const graphics = placeValue(game, x, y);
+            if (graphics) {
+              world.addChild(...graphics);
+
+              // save state to local storage
+              localStorage.setItem(
+                `steppin-level-${game.state.level}`,
+                JSON.stringify(game.state)
+              );
+            }
+          }
+
+          // stop panning
+          dragging = false;
+          dragPos = dragStart = null;
+        });
+        world.on("pointermove", (event) => {
+          const pos = { x: event.client.x, y: event.client.y };
+          if (!dragging && dragStart) {
+            const dx = pos.x - dragStart.x;
+            const dy = pos.y - dragStart.y;
+            if (Math.abs(dx) >= 5 || Math.abs(dy) >= 5) {
+              dragging = true;
+            }
+          }
+          if (dragging) {
+            world.position.x += event.client.x - dragPos.x;
+            world.position.y += event.client.y - dragPos.y;
+            dragPos = pos;
+          }
+        });
+
+        // undo button
+        const undoButton = makeButton("Undo", () => {
+          undoMove(game);
+        });
+        undoButton.position.set(10, 10);
+
+        // back button
+        const backButton = makeButton("Back", () => {
+          window.location = "../";
+        });
+        backButton.position.set(app.screen.width - backButton.width - 10, 10);
+        app.stage.addChild(world);
+        app.stage.addChild(undoButton);
+        app.stage.addChild(backButton);
+
+        window.addEventListener("resize", () => {
+          setTimeout(() => {
+            // remove all graphics on resize
+            while (world.children.length > 0) {
+              const child = world.removeChildAt(world.children.length - 1);
+              child.destroy({ children: true });
+            }
+
+            // determine new cell size
+            game.cellSize = Math.min(app.screen.width, app.screen.height) / 10;
+
+            // regenerate grid cells
+            world.addChild(buildGrid(game));
+            world.addChild(...rebuildGraphics(game));
+
+            // position back button
+            backButton.position.set(
+              app.screen.width - backButton.width - 10,
+              10
+            );
+          }, 1);
+        });
+
+        return world;
+      }
+
+      // load state from local storage
+      const localState = localStorage.getItem(`steppin-level-${level}`);
+      const gameState = localState
+        ? JSON.parse(localState)
+        : {
+            level, // number of 1s to place (first one is always placed)
+            ones: [[0, 0]], // first 1 at origin [0.0]
+            seq: [], // placement of 2, 3, 4, etc
+          };
+      createGameWorld(gameState, app);
+    </script>
+  </body>
+</html>
