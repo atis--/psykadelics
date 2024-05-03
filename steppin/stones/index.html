@@ -37,7 +37,7 @@
       } from "./helpers.js";
 
       const pixiScript = document.createElement("script");
-      pixiScript.src = `file.js?v=${Date.now()}`;
+      pixiScript.src = `pixi.js?v=${Date.now()}`;
       pixiScript.onload = async function () {
         // get ?level=x query parameter
         const queryParams = new URLSearchParams(window.location.search);
