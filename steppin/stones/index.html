@@ -17,7 +17,7 @@
 </style>
 <html>
   <head>
-    <script src="pixi.js"></script>
+    <!-- <script src="pixi.js"></script> -->
     <!-- <script src="pixi.min.js"></script> -->
   </head>
   <body>
@@ -36,210 +36,214 @@
         HintText,
       } from "./helpers.js";
 
-      // get ?level=x query parameter
-      const queryParams = new URLSearchParams(window.location.search);
-      const level = ensureInt(+queryParams.get("level"), 1, 5);
+      const pixiScript = document.createElement("script");
+      pixiScript.src = `file.js?v=${Date.now()}`;
+      pixiScript.onload = async function () {
+        // get ?level=x query parameter
+        const queryParams = new URLSearchParams(window.location.search);
+        const level = ensureInt(+queryParams.get("level"), 1, 5);
 
-      // create PIXI application
-      const app = new PIXI.Application();
-      globalThis.__PIXI_APP__ = app;
+        // create PIXI application
+        const app = new PIXI.Application();
+        globalThis.__PIXI_APP__ = app;
 
-      // add canvas that dynamically resizes to window
-      await app.init({
-        antialias: true,
-        background: 0x606060,
-        resizeTo: window,
-      });
-      document.body.appendChild(app.canvas);
-
-      // disable right click context menu
-      app.canvas.addEventListener("contextmenu", (event) =>
-        event.preventDefault()
-      );
-
-      // load fonts
-      PIXI.Assets.addBundle("fonts", {
-        ubuntu: "../font/Ubuntu_Mono/UbuntuMono-Bold.ttf",
-        ShinyCrystal: "../font/ShinyCrystal.ttf",
-      });
-      await PIXI.Assets.loadBundle("fonts");
-
-      function createGameWorld(gameState, app) {
-        // world container for game board
-        const world = new PIXI.Container();
-        world.position.set(app.screen.width / 2, app.screen.height / 2);
-
-        // determine cell size, create game form state
-        const cellSize = Math.min(app.screen.width, app.screen.height) / 9;
-        const [game, gameGraphics] = makeGameFromState(gameState, cellSize);
-
-        // generate grid cells, add game graphics
-        world.addChild(buildGrid(game));
-        if (gameGraphics.length > 0) {
-          world.addChild(...gameGraphics);
-        }
-
-        // mark next moves
-        const moveExists = markNextMoves(game);
-
-        function saveState() {
-          // save state to local storage
-          localStorage.setItem(
-            `steppin-level-${game.state.level}`,
-            JSON.stringify(game.state)
-          );
-        }
-
-        // handle to Congratulations screen
-        let congrats;
-
-        // handle pointer events
-        let dragging = false;
-        let dragStart = null;
-        let dragPos = null;
-        world.eventMode = "static";
-        world.on("pointerdown", (event) => {
-          // maybe start panning
-          dragPos = dragStart = { x: event.client.x, y: event.client.y };
+        // add canvas that dynamically resizes to window
+        await app.init({
+          antialias: true,
+          background: 0x606060,
+          resizeTo: window,
         });
-        world.on("pointerup", async (event) => {
-          console.log("pointer up!");
-          if (!dragging) {
-            // try placing a stone
-            const [x, y] = screenToGrid(
-              event.global.x,
-              event.global.y,
-              world,
-              game.cellSize
+        document.body.appendChild(app.canvas);
+
+        // disable right click context menu
+        app.canvas.addEventListener("contextmenu", (event) =>
+          event.preventDefault()
+        );
+
+        // load fonts
+        PIXI.Assets.addBundle("fonts", {
+          ubuntu: "../font/Ubuntu_Mono/UbuntuMono-Bold.ttf",
+          ShinyCrystal: "../font/ShinyCrystal.ttf",
+        });
+        await PIXI.Assets.loadBundle("fonts");
+
+        function createGameWorld(gameState, app) {
+          // world container for game board
+          const world = new PIXI.Container();
+          world.position.set(app.screen.width / 2, app.screen.height / 2);
+
+          // determine cell size, create game form state
+          const cellSize = Math.min(app.screen.width, app.screen.height) / 9;
+          const [game, gameGraphics] = makeGameFromState(gameState, cellSize);
+
+          // generate grid cells, add game graphics
+          world.addChild(buildGrid(game));
+          if (gameGraphics.length > 0) {
+            world.addChild(...gameGraphics);
+          }
+
+          // mark next moves
+          const moveExists = markNextMoves(game);
+
+          function saveState() {
+            // save state to local storage
+            localStorage.setItem(
+              `steppin-level-${game.state.level}`,
+              JSON.stringify(game.state)
             );
-            const [placed, graphics] = placeValue(game, x, y);
-            if (placed) {
-              if (graphics.length > 0) {
-                world.addChild(...graphics);
-              }
-              const moveExists = markNextMoves(game);
-              hintText.setHint(game, moveExists);
-              saveState();
-              if (!moveExists) {
-                // submit game state (well we trust the client so just level & score)
-                const response = await fetch(
-                  "http://64.227.114.65:3000/steppin/game",
-                  {
-                    method: "POST",
-                    mode: "cors",
-                    cache: "no-cache",
-                    headers: {
-                      "Content-Type": "application/json",
-                    },
-                    body: JSON.stringify({
-                      level,
-                      score: game.state.seq.length + 1,
-                    }),
-                  }
-                );
-                if (!response.ok) {
-                  throw new Error(
-                    "Network response was not ok: " + response.statusText
+          }
+
+          // handle to Congratulations screen
+          let congrats;
+
+          // handle pointer events
+          let dragging = false;
+          let dragStart = null;
+          let dragPos = null;
+          world.eventMode = "static";
+          world.on("pointerdown", (event) => {
+            // maybe start panning
+            dragPos = dragStart = { x: event.client.x, y: event.client.y };
+          });
+          world.on("pointerup", async (event) => {
+            if (!dragging) {
+              // try placing a stone
+              const [x, y] = screenToGrid(
+                event.global.x,
+                event.global.y,
+                world,
+                game.cellSize
+              );
+              const [placed, graphics] = placeValue(game, x, y);
+              if (placed) {
+                if (graphics.length > 0) {
+                  world.addChild(...graphics);
+                }
+                const moveExists = markNextMoves(game);
+                hintText.setHint(game, moveExists);
+                saveState();
+                if (!moveExists) {
+                  // submit game state (well we trust the client so just level & score)
+                  const response = await fetch(
+                    "http://64.227.114.65:3000/steppin/game",
+                    {
+                      method: "POST",
+                      mode: "cors",
+                      cache: "no-cache",
+                      headers: {
+                        "Content-Type": "application/json",
+                      },
+                      body: JSON.stringify({
+                        level,
+                        score: game.state.seq.length + 1,
+                      }),
+                    }
                   );
-                }
-                const reply = await response.json();
-                console.log(reply);
-                if (reply.congratulations) {
-                  congrats.setText(reply.message);
-                  congrats.show();
+                  if (!response.ok) {
+                    throw new Error(
+                      "Network response was not ok: " + response.statusText
+                    );
+                  }
+                  const reply = await response.json();
+                  console.log(reply);
+                  if (reply.congratulations) {
+                    congrats.setText(reply.message);
+                    congrats.show();
+                  }
                 }
               }
             }
-          }
 
-          // stop panning
-          dragging = false;
-          dragPos = dragStart = null;
-        });
-        world.on("pointermove", (event) => {
-          const pos = { x: event.client.x, y: event.client.y };
-          if (!dragging && dragStart) {
-            const dx = pos.x - dragStart.x;
-            const dy = pos.y - dragStart.y;
-            if (Math.abs(dx) >= 5 || Math.abs(dy) >= 5) {
-              dragging = true;
+            // stop panning
+            dragging = false;
+            dragPos = dragStart = null;
+          });
+          world.on("pointermove", (event) => {
+            const pos = { x: event.client.x, y: event.client.y };
+            if (!dragging && dragStart) {
+              const dx = pos.x - dragStart.x;
+              const dy = pos.y - dragStart.y;
+              if (Math.abs(dx) >= 5 || Math.abs(dy) >= 5) {
+                dragging = true;
+              }
             }
-          }
-          if (dragging) {
-            world.position.x += event.client.x - dragPos.x;
-            world.position.y += event.client.y - dragPos.y;
-            dragPos = pos;
-          }
-        });
-
-        app.stage.addChild(world);
-
-        // undo button
-        const undoButton = new Button(app.stage, "Undo", () => {
-          // undo move, update hint text, save state
-          undoMove(game);
-          markNextMoves(game);
-          hintText.setHint(game, true);
-          saveState();
-        });
-        undoButton.setPositionFn(() => [10, 10]);
-
-        // back button
-        const backButton = new Button(app.stage, "Back", () => {
-          window.location = "../";
-        });
-        backButton.setPositionFn(() => [
-          app.screen.width - backButton.getWidth() - 10,
-          10,
-        ]);
-
-        // hint text
-        const hintText = new HintText(app, game, moveExists);
-
-        // congratulations screen
-        congrats = new Congratulations(app, "Game not over yet!");
-        congrats.hide();
-
-        window.addEventListener("resize", () => {
-          setTimeout(() => {
-            // remove all graphics on resize
-            while (world.children.length > 0) {
-              const child = world.removeChildAt(world.children.length - 1);
-              child.destroy({ children: true });
+            if (dragging) {
+              world.position.x += event.client.x - dragPos.x;
+              world.position.y += event.client.y - dragPos.y;
+              dragPos = pos;
             }
+          });
 
-            // determine new cell size
-            game.cellSize = Math.min(app.screen.width, app.screen.height) / 9;
+          app.stage.addChild(world);
 
-            // regenerate grid cells & reset world position
-            world.addChild(buildGrid(game));
-            world.addChild(...rebuildGraphics(game));
+          // undo button
+          const undoButton = new Button(app.stage, "Undo", () => {
+            // undo move, update hint text, save state
+            undoMove(game);
             markNextMoves(game);
-            world.position.set(app.screen.width / 2, app.screen.height / 2);
+            hintText.setHint(game, true);
+            saveState();
+          });
+          undoButton.setPositionFn(() => [10, 10]);
 
-            // position buttons
-            undoButton.handleScreenResize();
-            backButton.handleScreenResize();
+          // back button
+          const backButton = new Button(app.stage, "Back", () => {
+            window.location = "../";
+          });
+          backButton.setPositionFn(() => [
+            app.screen.width - backButton.getWidth() - 10,
+            10,
+          ]);
 
-            // resize hint text and congrats overlay
-            hintText.handleScreenResize();
-            congrats.resize();
-          }, 1);
-        });
+          // hint text
+          const hintText = new HintText(app, game, moveExists);
 
-        return world;
-      }
+          // congratulations screen
+          congrats = new Congratulations(app, "Game not over yet!");
+          congrats.hide();
 
-      // load state from local storage
-      const localState = localStorage.getItem(`steppin-level-${level}`);
-      const gameState = localState
-        ? JSON.parse(localState)
-        : {
-            level, // number of 1s to place (first one is always placed)
-            ones: [[0, 0]], // first 1 at origin [0.0]
-            seq: [], // placement of 2, 3, 4, etc
-          };
-      createGameWorld(gameState, app);
+          window.addEventListener("resize", () => {
+            setTimeout(() => {
+              // remove all graphics on resize
+              while (world.children.length > 0) {
+                const child = world.removeChildAt(world.children.length - 1);
+                child.destroy({ children: true });
+              }
+
+              // determine new cell size
+              game.cellSize = Math.min(app.screen.width, app.screen.height) / 9;
+
+              // regenerate grid cells & reset world position
+              world.addChild(buildGrid(game));
+              world.addChild(...rebuildGraphics(game));
+              markNextMoves(game);
+              world.position.set(app.screen.width / 2, app.screen.height / 2);
+
+              // position buttons
+              undoButton.handleScreenResize();
+              backButton.handleScreenResize();
+
+              // resize hint text and congrats overlay
+              hintText.handleScreenResize();
+              congrats.resize();
+            }, 1);
+          });
+
+          return world;
+        }
+
+        // load state from local storage
+        const localState = localStorage.getItem(`steppin-level-${level}`);
+        const gameState = localState
+          ? JSON.parse(localState)
+          : {
+              level, // number of 1s to place (first one is always placed)
+              ones: [[0, 0]], // first 1 at origin [0.0]
+              seq: [], // placement of 2, 3, 4, etc
+            };
+        createGameWorld(gameState, app);
+      };
+      document.head.appendChild(pixiScript);
     </script>
   </body>
 </html>
