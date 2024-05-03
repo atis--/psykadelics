@@ -17,8 +17,8 @@
 </style>
 <html>
   <head>
-    <!-- <script src="pixi.js"></script> -->
-    <script src="pixi.min.js"></script>
+    <script src="pixi.js"></script>
+    <!-- <script src="pixi.min.js"></script> -->
   </head>
   <body>
     <script type="module">
@@ -103,6 +103,7 @@
           dragPos = dragStart = { x: event.client.x, y: event.client.y };
         });
         world.on("pointerup", async (event) => {
+          console.log("pointer up!");
           if (!dragging) {
             // try placing a stone
             const [x, y] = screenToGrid(
