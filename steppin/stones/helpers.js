@@ -446,7 +446,7 @@ export class HintText {
         this.numberTxt.text = 1;
       }
     } else {
-      this.txt.text = "Game over. Your score:";
+      this.txt.text = "Game over. Score:";
       this.numberTxt.text = state.seq.length + 1;
     }
     this.numberTxt.x = this.txt.width + 10;
