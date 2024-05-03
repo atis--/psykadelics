@@ -17,8 +17,8 @@
 </style>
 <html>
   <head>
-    <script src="pixi.js"></script>
-    <!-- <script src="pixi.min.js"></script> -->
+    <!-- <script src="pixi.js"></script> -->
+    <script src="pixi.min.js"></script>
   </head>
   <body>
     <script type="module">
@@ -26,23 +26,30 @@
         screenToGrid,
         buildGrid,
         placeValue,
-        makeButton,
         rebuildGraphics,
         undoMove,
         ensureInt,
         makeGameFromState,
+        markNextMoves,
+        Button,
+        Congratulations,
+        HintText,
       } from "./helpers.js";
 
       // get ?level=x query parameter
       const queryParams = new URLSearchParams(window.location.search);
-      const level = ensureInt(+queryParams.get("level"), 1, 10);
+      const level = ensureInt(+queryParams.get("level"), 1, 5);
 
       // create PIXI application
       const app = new PIXI.Application();
       globalThis.__PIXI_APP__ = app;
 
       // add canvas that dynamically resizes to window
-      await app.init({ background: 0x909090, resizeTo: window });
+      await app.init({
+        antialias: true,
+        background: 0x606060,
+        resizeTo: window,
+      });
       document.body.appendChild(app.canvas);
 
       // disable right click context menu
@@ -63,12 +70,28 @@
         world.position.set(app.screen.width / 2, app.screen.height / 2);
 
         // determine cell size, create game form state
-        const cellSize = Math.min(app.screen.width, app.screen.height) / 10;
+        const cellSize = Math.min(app.screen.width, app.screen.height) / 9;
         const [game, gameGraphics] = makeGameFromState(gameState, cellSize);
 
         // generate grid cells, add game graphics
         world.addChild(buildGrid(game));
-        world.addChild(...gameGraphics);
+        if (gameGraphics.length > 0) {
+          world.addChild(...gameGraphics);
+        }
+
+        // mark next moves
+        const moveExists = markNextMoves(game);
+
+        function saveState() {
+          // save state to local storage
+          localStorage.setItem(
+            `steppin-level-${game.state.level}`,
+            JSON.stringify(game.state)
+          );
+        }
+
+        // handle to Congratulations screen
+        let congrats;
 
         // handle pointer events
         let dragging = false;
@@ -79,7 +102,7 @@
           // maybe start panning
           dragPos = dragStart = { x: event.client.x, y: event.client.y };
         });
-        world.on("pointerup", (event) => {
+        world.on("pointerup", async (event) => {
           if (!dragging) {
             // try placing a stone
             const [x, y] = screenToGrid(
@@ -88,15 +111,43 @@
               world,
               game.cellSize
             );
-            const graphics = placeValue(game, x, y);
-            if (graphics) {
-              world.addChild(...graphics);
-
-              // save state to local storage
-              localStorage.setItem(
-                `steppin-level-${game.state.level}`,
-                JSON.stringify(game.state)
-              );
+            const [placed, graphics] = placeValue(game, x, y);
+            if (placed) {
+              if (graphics.length > 0) {
+                world.addChild(...graphics);
+              }
+              const moveExists = markNextMoves(game);
+              hintText.setHint(game, moveExists);
+              saveState();
+              if (!moveExists) {
+                // submit game state (well we trust the client so just level & score)
+                const response = await fetch(
+                  "http://64.227.114.65:3000/steppin/game",
+                  {
+                    method: "POST",
+                    mode: "cors",
+                    cache: "no-cache",
+                    headers: {
+                      "Content-Type": "application/json",
+                    },
+                    body: JSON.stringify({
+                      level,
+                      score: game.state.seq.length + 1,
+                    }),
+                  }
+                );
+                if (!response.ok) {
+                  throw new Error(
+                    "Network response was not ok: " + response.statusText
+                  );
+                }
+                const reply = await response.json();
+                console.log(reply);
+                if (reply.congratulations) {
+                  congrats.setText(reply.message);
+                  congrats.show();
+                }
+              }
             }
           }
 
@@ -120,20 +171,33 @@
           }
         });
 
+        app.stage.addChild(world);
+
         // undo button
-        const undoButton = makeButton("Undo", () => {
+        const undoButton = new Button(app.stage, "Undo", () => {
+          // undo move, update hint text, save state
           undoMove(game);
+          markNextMoves(game);
+          hintText.setHint(game, true);
+          saveState();
         });
-        undoButton.position.set(10, 10);
+        undoButton.setPositionFn(() => [10, 10]);
 
         // back button
-        const backButton = makeButton("Back", () => {
+        const backButton = new Button(app.stage, "Back", () => {
           window.location = "../";
         });
-        backButton.position.set(app.screen.width - backButton.width - 10, 10);
-        app.stage.addChild(world);
-        app.stage.addChild(undoButton);
-        app.stage.addChild(backButton);
+        backButton.setPositionFn(() => [
+          app.screen.width - backButton.getWidth() - 10,
+          10,
+        ]);
+
+        // hint text
+        const hintText = new HintText(app, game, moveExists);
+
+        // congratulations screen
+        congrats = new Congratulations(app, "Game not over yet!");
+        congrats.hide();
 
         window.addEventListener("resize", () => {
           setTimeout(() => {
@@ -144,17 +208,21 @@
             }
 
             // determine new cell size
-            game.cellSize = Math.min(app.screen.width, app.screen.height) / 10;
+            game.cellSize = Math.min(app.screen.width, app.screen.height) / 9;
 
-            // regenerate grid cells
+            // regenerate grid cells & reset world position
             world.addChild(buildGrid(game));
             world.addChild(...rebuildGraphics(game));
+            markNextMoves(game);
+            world.position.set(app.screen.width / 2, app.screen.height / 2);
 
-            // position back button
-            backButton.position.set(
-              app.screen.width - backButton.width - 10,
-              10
-            );
+            // position buttons
+            undoButton.handleScreenResize();
+            backButton.handleScreenResize();
+
+            // resize hint text and congrats overlay
+            hintText.handleScreenResize();
+            congrats.resize();
           }, 1);
         });
 

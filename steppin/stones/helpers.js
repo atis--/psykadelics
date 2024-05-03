@@ -1,3 +1,8 @@
+const WHITE = 0xffffff;
+const GREEN = 0x81df5b;
+const YELLOW = 0xeede22;
+const NUMBER_BLUE = 0x69c8da;
+
 export function screenToGrid(xs, ys, world, cellSize) {
   const { x: xw, y: yw } = world.position;
   const xd = xs - xw;
@@ -22,6 +27,10 @@ export function screenToGrid(xs, ys, world, cellSize) {
   return [x, y];
 }
 
+function onesDone(game) {
+  return game.state.level + 1 == game.state.ones.length;
+}
+
 export function buildGrid(game) {
   const gridGraphics = new PIXI.Graphics();
   const { boardSize, cellSize } = game;
@@ -39,29 +48,26 @@ export function buildGrid(game) {
   return gridGraphics;
 }
 
-const cachedStyles = {};
-
 function cellFontStyle(x, y, sumValue, cellSize, next = false) {
   const tileType = (x + y) % 2;
-  const key = `${sumValue},${tileType},${next}`;
-  if (cachedStyles[key]) {
-    return cachedStyles[key];
-  }
-  let fill = 0xffffff;
+
+  let fill = NUMBER_BLUE;
   if (sumValue) {
     if (next) {
-      fill = 0x81df5b; // bright green
+      fill = GREEN;
     } else {
       fill = tileType == 0 ? 0xa5a5a5 : 0x909090; // shades of gray
     }
   }
-  return (cachedStyles[key] = new PIXI.TextStyle({
+
+  let fontSize = cellSize / (sumValue ? 2.2 : 1.3);
+  return new PIXI.TextStyle({
     fontFamily: "ShinyCrystal",
-    fontSize: cellSize / (sumValue ? 2.5 : 1.2),
+    fontSize,
     fontWeight: "bold",
     letterSpacing: 2,
     fill,
-  }));
+  });
 }
 
 function buildCellText(x, y, value, sumValue, cellSize) {
@@ -74,15 +80,19 @@ function buildCellText(x, y, value, sumValue, cellSize) {
   return txt;
 }
 
-function colorNextMove(game) {
+export function markNextMoves(game) {
   const { board, state, cellSize } = game;
-  const oneStonesDone = state.level + 1 == state.ones.length;
+  const oneStonesDone = onesDone(game);
   const nextValue = state.seq.length + 2;
+  let nextMoveExists = false;
   for (const [location, boardEntry] of Object.entries(board)) {
     if (boardEntry.value > 0) {
       continue; // skip placed values
     }
     const [x, y] = location.split(",").map((n) => +n);
+    if (!nextMoveExists && boardEntry.value == -nextValue) {
+      nextMoveExists = true;
+    }
     boardEntry.txt.style = cellFontStyle(
       x,
       y,
@@ -91,6 +101,7 @@ function colorNextMove(game) {
       oneStonesDone && boardEntry.value == -nextValue
     );
   }
+  return nextMoveExists || !oneStonesDone;
 }
 
 const walkaround = [
@@ -163,10 +174,10 @@ export function undoMove(game) {
       }
     }
 
-    // set undone stone to its sum value & color moves
+    // set undone stone to its sum value
     const boardEntry = board[`${x},${y}`];
     boardEntry.value = -undoValue;
-    colorNextMove(game);
+    boardEntry.txt.style = cellFontStyle(x, y, true, cellSize);
   } else if (state.ones.length > 1) {
     let sumValue = 0;
     const [x, y] = state.ones.pop();
@@ -204,26 +215,26 @@ export function undoMove(game) {
       boardEntry.txt.text = sumValue;
       boardEntry.txt.style = cellFontStyle(x, y, true, cellSize);
     }
-    colorNextMove(game);
   }
 }
 
+// -> [placed, [graphics]]
 export function placeValue(game, x, y) {
   const { board, state, cellSize } = game;
   const location = `${x},${y}`;
   let boardEntry = board[location];
   if (boardEntry && boardEntry.value > 0) {
-    return null; // location already occupied
+    return [false, []]; // location already occupied
   }
 
   let value;
-  if (state.ones.length <= state.level) {
+  if (!onesDone(game)) {
     value = 1;
     state.ones.push([x, y]);
   } else {
     value = state.seq.length + 2;
     if (!boardEntry || boardEntry.value !== -value) {
-      return null; // sum value mismatch
+      return [false, []]; // sum value mismatch
     }
     state.seq.push([x, y]);
   }
@@ -234,10 +245,7 @@ export function placeValue(game, x, y) {
     boardEntry.txt.text = value;
     boardEntry.txt.style = cellFontStyle(x, y, false, cellSize);
     const graphics = placeSumValues(game, x, y, value);
-    if (state.level == state.ones.length - 1) {
-      colorNextMove(game);
-    }
-    return graphics.length > 0 ? graphics : null;
+    return [true, graphics];
   }
 
   // create a new board entry
@@ -247,10 +255,7 @@ export function placeValue(game, x, y) {
   };
   const graphics = placeSumValues(game, x, y, value);
   graphics.push(boardEntry.txt);
-  if (state.level == state.ones.length - 1) {
-    colorNextMove(game);
-  }
-  return graphics.length > 0 ? graphics : null;
+  return [true, graphics];
 }
 
 export function ensureInt(n, from, to) {
@@ -273,10 +278,12 @@ export function makeGameFromState(state, cellSize) {
     cellSize,
   };
   for (const [x, y] of state.ones) {
-    graphics.push(...placeValue(game, x, y));
+    const [placed, g] = placeValue(game, x, y);
+    graphics.push(...g);
   }
   for (const [x, y] of state.seq) {
-    graphics.push(...placeValue(game, x, y));
+    const [placed, g] = placeValue(game, x, y);
+    graphics.push(...g);
   }
   return [game, graphics];
 }
@@ -300,66 +307,238 @@ export function rebuildGraphics(game) {
   return graphics;
 }
 
-export function makeButton(text, fn) {
-  // button container
-  const alpha = 0.6;
-  const button = new PIXI.Container();
-  button.alpha = alpha;
+export class Button {
+  constructor(parent, text, fn) {
+    this.positionFn = null;
 
-  // button text
-  const txt = new PIXI.Text({
-    text,
-    style: {
-      fontFamily: "ubuntu",
-      fontSize: 32,
-      fontWeight: "bold",
-      fill: 0xffffff,
-    },
-  });
-  txt.anchor.set(0.5);
+    // button container
+    const alpha = 0.6;
+    this.button = new PIXI.Container();
+    this.button.alpha = alpha;
 
-  // rounded rectangle
-  const rect = new PIXI.Graphics();
-  function makeRect(active) {
-    rect
-      .clear()
-      .roundRect(0, 0, txt.width + 40, 40, 10)
-      .fill(0x389dae); // light blue
-    if (active) {
-      rect.stroke({ width: 2, color: 0xffffff });
+    // button text
+    const txt = new PIXI.Text({
+      text,
+      style: {
+        fontFamily: "ubuntu",
+        fontSize: 32,
+        fontWeight: "bold",
+        fill: WHITE,
+      },
+    });
+    txt.anchor.set(0.5);
+
+    // rounded rectangle
+    const rect = new PIXI.Graphics();
+    function makeRect(active) {
+      rect
+        .clear()
+        .roundRect(0, 0, txt.width + 40, 40, 10)
+        .fill(0x389dae); // light blue
+      if (active) {
+        rect.stroke({ width: 2, color: WHITE });
+      }
     }
+
+    // append and position
+    makeRect(false);
+    this.button.addChild(rect);
+    txt.position.set(rect.width / 2, 19);
+    this.button.addChild(txt);
+
+    // handle events
+    let inside = false;
+    this.button.eventMode = "static";
+    this.button.on("pointerenter", (event) => {
+      inside = true;
+      makeRect(true);
+      this.button.alpha = 1.0;
+    });
+    this.button.on("pointerleave", (event) => {
+      inside = false;
+      makeRect(false);
+      this.button.alpha = alpha;
+    });
+    this.button.on("pointerdown", (event) => {
+      makeRect(false);
+      this.button.alpha = alpha;
+      fn();
+    });
+    this.button.on("pointerup", (event) => {
+      if (inside) {
+        makeRect(true);
+        this.button.alpha = 1.0;
+      }
+    });
+
+    parent.addChild(this.button);
   }
 
-  // append and position
-  makeRect(false);
-  button.addChild(rect);
-  txt.position.set(rect.width / 2, 19);
-  button.addChild(txt);
+  getWidth() {
+    return this.button.width;
+  }
 
-  // handle events
-  let inside = false;
-  button.eventMode = "static";
-  button.on("pointerenter", (event) => {
-    inside = true;
-    makeRect(true);
-    button.alpha = 1.0;
-  });
-  button.on("pointerleave", (event) => {
-    inside = false;
-    makeRect(false);
-    button.alpha = alpha;
-  });
-  button.on("pointerdown", (event) => {
-    makeRect(false);
-    button.alpha = alpha;
-    fn();
-  });
-  button.on("pointerup", (event) => {
-    if (inside) {
-      makeRect(true);
-      button.alpha = 1.0;
+  getHeight() {
+    return this.button.height;
+  }
+
+  setPositionFn(fn) {
+    this.positionFn = fn;
+    this.button.position.set(...this.positionFn());
+  }
+
+  handleScreenResize() {
+    this.button.position.set(...this.positionFn());
+  }
+}
+
+export class HintText {
+  constructor(app, game, moveExists) {
+    this.app = app;
+    this.container = new PIXI.Container();
+    this.txt = new PIXI.Text({
+      text: "Place",
+      style: {
+        fontFamily: "ubuntu",
+        fontSize: 28,
+        fontWeight: "bold",
+        fill: WHITE,
+      },
+    });
+    this.txt.anchor.y = 1;
+    this.container.addChild(this.txt);
+
+    this.numberTxt = new PIXI.Text({
+      text: 1,
+      style: {
+        fontFamily: "ubuntu",
+        fontSize: 28,
+        fontWeight: "bold",
+        fill: NUMBER_BLUE,
+      },
+    });
+    this.numberTxt.anchor.y = 1;
+    this.numberTxt.x = this.txt.width + 10;
+    this.container.addChild(this.numberTxt);
+    this.positionContainer();
+    this.app.stage.addChild(this.container);
+    this.setHint(game, moveExists);
+  }
+
+  positionContainer() {
+    const textWidth = this.txt.width + this.numberTxt.width + 10;
+    this.container.position.set(
+      this.app.screen.width / 2 - textWidth / 2,
+      this.app.screen.height - 10
+    );
+  }
+
+  setHint(game, moveExists) {
+    const { state } = game;
+    if (moveExists) {
+      if (onesDone(game)) {
+        this.txt.text = "Place:";
+        this.numberTxt.text = state.seq.length + 2;
+      } else {
+        const remainingOnes = state.level + 1 - state.ones.length;
+        this.txt.text =
+          remainingOnes == 1 ? "Place" : `Place ${remainingOnes} x`;
+        this.numberTxt.text = 1;
+      }
+    } else {
+      this.txt.text = "Game over. Your score:";
+      this.numberTxt.text = state.seq.length + 1;
     }
-  });
+    this.numberTxt.x = this.txt.width + 10;
+    this.positionContainer();
+  }
 
-  return button;
+  handleScreenResize() {
+    this.positionContainer();
+  }
+}
+
+export class Congratulations {
+  constructor(app, text) {
+    this.app = app;
+    this.hidden = false;
+    this.object = this.rect = this.star = this.txt = null;
+    this.create();
+  }
+
+  create() {
+    const { screen } = this.app;
+    this.object = new PIXI.Container();
+    this.object.renderable = !this.hidden;
+
+    // overlay rectangle
+    this.rect = new PIXI.Graphics()
+      .rect(0, 0, screen.width, screen.height)
+      .fill({ color: 0x000000, alpha: 0.5 });
+    this.rect.eventMode = "static";
+    this.object.addChild(this.rect);
+
+    // success star
+    const starSize = Math.min(screen.width, screen.height) / 4;
+    this.star = new PIXI.Graphics()
+      .star(screen.width / 2, screen.height / 2, 5, starSize)
+      .fill({ color: YELLOW, alpha: 0.8 })
+      .stroke({ width: 8, color: GREEN, alpha: 0.5 });
+    this.object.addChild(this.star);
+
+    // congrats text
+    this.txt = new PIXI.Text({
+      text: "Congratulations!",
+      style: {
+        fontFamily: "ubuntu",
+        fontSize: 32,
+        fontWeight: "bold",
+        fill: WHITE,
+        align: "center",
+        wordWrap: true,
+        wordWrapWidth: 300,
+      },
+    });
+    this.txt.anchor.set(0.5);
+    this.txt.x = screen.width / 2;
+    this.txt.y = screen.height / 2;
+    this.object.addChild(this.txt);
+
+    this.button = new Button(this.object, "Continue", () => {
+      this.hide();
+    });
+    this.button.setPositionFn(() => {
+      return [
+        this.app.screen.width / 2 - this.button.getWidth() / 2,
+        this.app.screen.height - this.button.getHeight() - 50,
+      ];
+    });
+
+    // add to application stage
+    this.app.stage.addChild(this.object);
+  }
+
+  setText(message) {
+    this.txt.text = message;
+  }
+
+  destroy() {
+    this.object.destroy({ children: true });
+    this.object = this.rect = this.star = this.txt = null;
+  }
+
+  resize() {
+    this.destroy();
+    this.create();
+  }
+
+  show() {
+    this.hidden = false;
+    this.object.renderable = true;
+  }
+
+  hide() {
+    this.hidden = true;
+    this.object.renderable = false;
+  }
 }
