@@ -1,0 +1,3055 @@
+-- Program configuration.
+
+local eapi = eapi or { }
+
+Cfg = {
+        name = "Kule",
+	version = "devel",
+
+	-- Display.
+	fullscreen	= false,
+	windowWidth	= 320,
+	windowHeight	= 240,
+	screenBPP	= 0,
+	
+	-- Sound.
+	channels	= 16,
+	frequency	= 22050,
+	chunksize	= 4096,
+	stereo		= true,
+
+	-- Debug things.
+	debug		= false,
+	useDesktop	= true,
+	screenWidth	= 320,
+	screenHeight	= 240,
+	printExtensions = false,
+	FPSUpdateInterval = 1000,
+	gameSpeed = 0,
+        defaultShapeColor = {r=0,g=1,b=0},
+
+	-- Default control scheme: actions mapped to keys.
+	controls = {
+		Left  = { "Left",  "Joy0 A0-", "Joy0 B1004" },
+		Right = { "Right", "Joy0 A0+", "Joy0 B1002" },
+
+		Drop  = { "Space", "Z", "X", "Joy0 B1" },
+		Quit  = { "Escape", "Joy0 B7" },
+	},
+
+        -- Engine config.
+        poolsize = {
+                world      = 12,
+                body       = 4000,
+                tile       = 4000,
+                shape      = 4000,
+                group      = 100,
+                camera     = 10,
+                texture    = 100,
+                spritelist = 200,
+                sound      = 100,
+                music      = 10,
+                timer      = 4000,
+                gridcell   = 50000,
+                property   = 20000,
+                collision  = 1000
+        },
+        collision_dist = 1,
+        cam_vicinity_factor = 0.5
+}
+
+return Cfg
+--
+-- Part of game engine API that doesn't require any low level access and is
+-- easier to do in Lua than in C anyway. The actual C API can be found in
+-- src/eapi_Lua.c. Everything here is in the `eapi` namespace table, just
+-- like the real API. Names of private functions and variables (those not
+-- meant to be called/accessed by user scripts) begin with two underscores.
+--
+
+require("input")
+
+eapi.idToObjectMap = {}
+local lastID = 0
+
+--
+-- Animation types (added to eapi from the engine during startup):
+--      eapi.ANIM_LOOP
+--      eapi.ANIM_CLAMP
+--      eapi.ANIM_CLAMP_EASEIN
+--      eapi.ANIM_CLAMP_EASEOUT
+--      eapi.ANIM_CLAMP_EASEINOUT
+--      eapi.ANIM_REVERSE_CLAMP
+--      eapi.ANIM_REVERSE_LOOP
+--
+
+--
+-- Predefined C step functions:
+--      eapi.STEPFUNC_STD
+--
+
+--
+-- Generate a new object ID,
+-- store object in `eapi.idToObjectMap`, and return the ID.
+--
+local function GenID(obj)        
+        lastID = lastID + 1
+        local ID = lastID
+        eapi.idToObjectMap[ID] = obj
+        return ID
+end
+
+--
+-- Generate a new object ID for user arguments.
+--
+local function GenArgID(args)
+        local argID = 0
+        if #args ~= 0 then
+                argID = GenID(args)
+        end
+        return argID
+end
+
+--
+-- Reset all engine-side and script-side state.
+--
+function eapi.Clear()
+        -- Clear engine-side state.
+        eapi.__Clear()
+        
+        -- Clear client-side (script) state.
+        eapi.idToObjectMap = {}
+        lastID = 0
+end
+
+--
+-- Set an object's step function. If `nil`, then current step function is unset.
+--
+function eapi.SetStep(obj, stepFunc, ...)
+        -- Remove previous step function from eapi.idToObjectMap.
+        local stepFuncID, argID = eapi.__GetStep(obj)
+        if stepFuncID then
+                eapi.idToObjectMap[stepFuncID] = nil
+                if argID ~= 0 then
+                        eapi.idToObjectMap[argID] = nil
+                end
+        end
+        
+        stepFuncID = nil
+        if stepFunc then
+                stepFuncID = GenID(stepFunc)
+        end
+        eapi.__SetStep(obj, stepFuncID, GenArgID(arg))
+end
+
+--
+-- Set an object's step function. Unlike SetStep(), `stepFunc` must not refer to
+-- a Lua function but should be a C function pointer instead.
+--
+function eapi.SetStepC(obj, stepFunc, ...)
+        -- Remove previous user args from eapi.idToObjectMap.
+        local stepFuncID, argID = eapi.__GetStep(obj)
+        if argID ~= 0 and eapi.idToObjectMap[argID] then
+                eapi.idToObjectMap[argID] = nil
+        end
+        eapi.__SetStepC(obj, stepFunc, GenArgID(arg))
+end
+
+--
+-- Register a timer function to be called at a specified time.
+--
+-- obj          World or Body object. Body timers are called only when the
+--              body is visible or almost visible on screen. World timers
+--              behave like normal timer functions and will be called when their
+--              time comes.
+-- when         How many seconds until timer is called.
+-- func         Timer function.
+--
+function eapi.AddTimer(obj, when, func, ...)
+        return eapi.__AddTimer(obj, when, GenID(func), GenArgID(arg))
+end
+
+--
+-- Set function that handles keyboard input. The function will be executed
+-- whenever a key is either pressed or released. The prototype for it is
+-- like this:
+--
+--      KeyFunc({scancode=?, keycode=?}, pressed)
+-- 
+-- where `scancode` is a physical key location-dependent identifier
+-- (SDL_Scancode), and keycode is a character layout-dependent identifier
+-- (SDL_Keycode). `pressed` is a boolean value indicating whether the key
+-- has been pressed of released.
+--
+-- To get key name from its scancode or vice versa, use these functions:
+--
+--      eapi.GetKeyName(scancode)
+--      eapi.GetKeyFromName(scancodeName)
+--
+function eapi.BindKeyboard(func, ...)
+        eapi.__BindKeyboard(GenID(func), GenArgID(arg))
+end
+
+--
+-- Set function that handles joystick buttons. Prototype:
+--
+--      JoyButton(joystickID, buttonID, pressed)
+--
+function eapi.BindJoystickButton(func, ...)
+        eapi.__BindJoystickButton(GenID(func), GenArgID(arg))
+end
+
+--
+-- Set function that handles joystick axis movement. Prototype:
+--
+--      JoyAxis(joystickID, axisID, value)
+--
+function eapi.BindJoystickAxis(func, ...)
+        eapi.__BindJoystickAxis(GenID(func), GenArgID(arg))
+end
+
+--
+-- Register collision handler.
+--
+--      world           World object.
+--      groupA/B	Each shape belongs to a group. The name of this group
+--                      is supplied as argument to eapi.NewShape().
+--                      eapi.Collide() accepts as arguments the names of two
+--                      groups, and registers a collision handler to call when
+--                      two shapes belonging to these groups collide.
+--                      groupNameA can be the same as groupNameB. In that case,
+--                      shapes within the same group will collide.
+--      func            Callback function that will handle collisions between
+--                      pairs of shapes from the two groups.
+--                      Pass in `nil` to remove collision handler for a
+--                      particular pair. In this case the rest of the arguments
+--                      must not be present (or nil as well).
+--      upd		If true, collision events are received continuously
+--                      (each step). If false, collision function is called when
+--                      collision between two shapes starts (shapes touch after
+--                      being separate), and then when it ends ("separation"
+--                      callback).
+--      priority        Priority determines the order in which collision
+--                      handlers are called for a particular pair of shapes.
+--                      So lets say we have registered handlers for these two
+--                      pairs:
+--                              "Player" vs "Ground"
+--                              "Player" vs "Exit".
+--                      Now a shape belonging to group "Player" can be
+--                      simultaneously colliding with both a "Ground" shape and
+--                      an "Exit" shape. If priorities are the same for both
+--                      handlers, then the order in which they will be executed
+--                      is undetermined. We can, however, set the priority of
+--                      "Player" vs "Ground" handler to be higher, so that it
+--                      would always be executed first.
+--
+function eapi.Collide(world, groupA, groupB, func, upd, priority, ...)
+        if not func then
+                eapi.__Collide(world, groupA, groupB, nil)
+                return
+        end
+        eapi.__Collide(world, groupA, groupB, GenID(func), upd, priority,
+                       GenArgID(arg))
+end
+
+--
+-- Whenever it's necessary to invoke a function if only its ID in the
+-- `eapi.idToObjectMap` table is known, the engine calls eapi.__CallFunc() with
+-- the function ID as argument.
+--
+-- funcID       ID that maps to a Lua function.
+-- argID        ID of extra arguments that must be
+--		looked up in `eapi.idToObjectMap`.
+--              Zero means that there are no saved user arguments.
+-- remove       Remove function from the eapi.idToObjectMap table once the
+--              function has finished.
+--
+function eapi.__CallFunc(funcID, argID, remove, ...)
+        local idToObjectMap = eapi.idToObjectMap
+        local func = idToObjectMap[funcID]
+        if argID == 0 then
+                if remove then
+                        idToObjectMap[funcID] = nil
+                end
+                return func(unpack(arg))
+        end
+        
+        local savedArgs = eapi.idToObjectMap[argID]
+        if remove then
+                idToObjectMap[funcID] = nil
+                idToObjectMap[argID] = nil
+        end
+        
+        -- Append `savedArgs` to `arg` because we cannot unpack() both in one
+        -- function call. (Doing `func(unpack(arg), unpack(savedArgs))` does not
+        -- work!).
+        local sz = #arg
+        for i, v in ipairs(savedArgs) do
+                arg[sz + i] = v
+        end
+        return func(unpack(arg))
+end
+‰PNG
+
+   IHDR   @   @   úù­   gAMA  ±üa    cHRM  z&  €„  ú   €è  u0  ê`  :˜  pœºQ<   bKGD      ùC»  ôIDATxÚ½ÛoÕÇ§pê±-Š¢õ.­­½¡	m¼_"ŞÅªş!<ô‰_ø+”I£=1cÑJ<Fc¼Eâåç]I’ÆÖPoE©
+
+µOß~XÌw˜´Up^¦çtf×Z{í5{öwíuj’E÷Ş{ï½÷ŞÛĞpî¹ç{î¹İİµµµµµµMM…B¡P(pÕşı‡>|øğ¾}Ï>ûì³Ï>;1±Øö:6lØ°aÃ†††+V¬X±¢»»X,‹Å¦¦eË–-[¶,ItŞ¿ÿ?şøã?öí{æ™gyæ™S‡Úi§vÚiYı=zôèÑ}û~úé§Ÿ~úäá?øàƒ>ø`CC}}}}}ıÂøƒƒƒƒƒƒã×äıãºë®»îºëŠÅÕ«W¯^½º¯¯¡¡¡¡¡aÓ¦•+W®\¹²»ûŒ3Î8ãŒ3jj$P’H ¹¹#G9rdtT±sç¾}ûöíÛW*½üòË/¿üòÑ£‹Uø®»îºë®»ŠÅ³Î:ë¬³ÎêëŞ¦M@XSƒ–/_¾|ùò¹¹©©©©©©ÑÑ¿şúë¯¿şÚ¹³R©T*•R©\.—ËåÅãçé/9º»%WMÍé§Ÿ~úé§'IMMMMMÍÜÜääääääè¨ì°sç7ß|óÍ7ß”J/½ôÒK/½´xü[o½õÖ[o-ûúêêêêêê6m:óÌ3Ï<óÌîn9bØü™™™™™™ÑQ9Bèÿê«¯¾úê«YüŒÜvÛm·İv[S“Üµëì³Ï>ûì³{{eğ$¹è¢‹.ºè¢$9çœsÎ9çœ$ÑuqVÇ'Éwß}÷İwß%ÉO?ıôÓO?•Ë?üğÃ?ü°mÛã?şøã8§øwÜqÇw45ÉĞ»vIáŞŞ/¼ğÂ/Lä¸ôÒK/½ôÒ$‘Câ I2=====n’üøã?şøcà?öØc=öX>şí·ß~ûí·75	7ô?ÿüóÏ?ÿüÀGU«V­Zµ*ğåxI"¼$9pàÀÊåï¿ÿşûï¿ß¶m``````ñúëÜÛ{ŞyçwŞyI"‡\É—$8"öÿùçŸşùgú¡\–=¶m+•J¥R)ğ—óG{{{{{{]}ôQyØ† ]rÉ%—\rI8Àe—]vÙe—Åù‚.¸à‚Â@8„BsG‡ÓÒ"-—%Øì,ø­­­­­­uu2là£øÅ_|ñÅ‡Àmiiiii	‡à:İŸ$ÿı÷ßÿİÑ¡‘ÙÒ¢GW¹üí·ß~ûí·ßÙÙÙÙÙYW'Ç|À$Á°C[[[[[[ÈƒşÈ«K’ÙÙÙÙÙÙ9fK‹"I¹¬ÈÅ—½}T÷oØÀ@Ãîèyùå—_~ùåŞÈ+¦õ°¿¥\] ¯OŠ?ô
+ œw˜‘°BV’T«Õjµš$štuéQ11ñá‡~øá‡ÿûøW\qÅW\Ñ×§öĞCt ; xş™ëe`B"ÀÈèê’dñÑ_÷gññ8^ssssss|Ãcæ&ssssss¯Ï}ôÑG}ø€aìˆCƒİq8ì >r‘4 ’äĞ¡C‡êê’\¿LÔĞ ƒmİªÉÏô$áCˆÁ1 âz?ü><Y×oŞÌ3NW74è¼u+Ïtğ9»ƒ!ŠúÁuœ	•àßtÓM7İtS±(¼†uÌÖ­r=ÜÁ+=	‹ÃåEµ»yó5×\sÍ5×‹j?ği|>Ó‘|ïöç{pqıï¾ûî»ï¾»X,è‹öv9Àš5x,0#
+ƒóy¡Ò·¶*t77Õ×wÍğ8£ &wÑ.#;ï@Îô$5‹¯gcà£?úÑ.‘3öâğÿsHÖVEœææßÿı÷ß¯¯—¼¡?r ‡ƒrÆîˆÌEhù¤Wk«"JssAÏÆÕ«ÕPm-“(nÔl’$â1,Ÿ¹ïàÁƒL’_~ùå—_~‰É‰Ú_±BçÍ	&'ÁG:€Ÿ3îÃ«Ğz€¯ëzzd¨ÉI}®­Å ØAö	½hŸöÀõHôçŸşùçŸI"ıüóŠj¯§grş@ô¦¹ß½pìŸ~äÅuàKşÀŸ÷™¹9W\¯1a Æ|$Ò(ğë¯¿şúë¯Ì‚“DŠidÌÎJÁ,>gî£ÃQŒY>òùHÅÀwGĞu³³Âáõ1îÇğèKGcpÊ3Ú##x®Ú¡fge¹9×y¸}q@şÏû§ç!?ıÉõ³óGA¯cczÆÍÌ(ÔÔÖb(÷$ h1‚ 8¯#¢ö¦§¥øè¨"EµªgäÌŒ|¾ñB „¡õ!¹§çÑQ]_­êú™ÉU[Ëıè	íĞÑè``„ë‘|Ş×ÑªUáÎÌèÿµµØ‘Gr¸¾âÑy±ûøøøøøxØıü!AFF4ièìD1F2
+" “Q€!xĞ:¶R‘ •Š®/%ğÈˆ°³ÓG÷Ó.òñHÀ ş=g"CV*2H¥"}˜Œ¾OÆ~ûí·ß~û-ÛÁLÈM‡¹è¾JEßW*’·XÔ÷##j¯³“ÀıDN$z¥_·£?ø?r"?úË1*•ù§ÖÔ”:°Pë×ãá>¤ƒ9£ÓáœCp¬‡ÖÊÔ=àË€…ùcızF€G>Óg78¸È‘¾îá‡ß|óÍ7ß|3ğÕ~è>zÓèzsÆĞØ3‚şo¼ñÆo¼øú¾PÃ¯_âXàûgì®?óùÏ:‡şÇæR TRÈ^·NßnÜˆŠÔGª_—~¦íŞ-œ]»|Ö®öJ%á­['lÜÈë›¿×£ÏŠİQ_‘Å—AC9ÀÆüß_ÃÜİNnµ¿{·:$‹¯ö_ú¾OòˆLDfŸ{$FÉøË]	úî»òHÚÚ¸‚‘è
+úd‘R{CCÛ·¿÷Ş{ï½÷ŞÁƒ'~y›V{ï¾«ûººô}[xt ‡æôyhHçíÛµ ´0¾Î,Ü´µëÍHä|b9¯#ì/Çû»İ½£}î¢óĞ"ÅöíZ 
+üŞäW®”'öõi!aËyb{;1é‘W­Jàáa	:0 êï×Òç‘#É’À×³nË=#ÛÛyö*…[­ªÃ†‡õy`@Kıı2ÀÒñuîëÓ÷–-ziog}ıïjuxXrhÉ¹¿_#oéøá¡¿æ(aF>ønE¼ş~M³ø‹XÊ9şXµJçµk%Hc£07§H1>.À½{uİ¡CKkéøÂ›Ó÷ãã2ô©ÃŞÚµr¼ÆF=*ææÔQããr´S¯?ør^#ÇÇi_Xèûî»ï¾ûî›š’çMOËó
+A2LµªIH¡ğüóÏ?ÿüó'Oõûï¿ÿşûïŸšRÇOOËñ
+…t>@µªP{òñÑßñÓ+pÿÂ/¼ğÂ'ıúõë×¯ŸšRäû{Ò (††††††n77\uÕUW]uU±(Ò#øp³|4‘€÷{bçÎááááááRé•W^yå•WÏ‡‹–-õè	>œ„ğ™	x­ÿ«¯¾úê«¯J%Íºßİİİİİù ä# ?ùé%ÚÈ‡ @´p©¤Y<şõ×_ıõ×‹b!!‰6mÒä¯»[\Càëˆ| ô'#OÿŒ¬[·nİºu‘  Ş^Şûa¥Xƒôàµ‰Iğñ¢·m{ê©§zê©…ùx)¼k—Î½½Ğœ°`Ğ³¼3+Ÿ•3ñğÁ‡?ùä“O>ùd>>úƒşà£7ö€şf ğº'ÜÈ A™Jùø·ÜrË-·ÜùäC8¬ ¯ğ@>‚ú¡\Ş¿ÿşıû³øÇŞ::::::êê¤à£Ê³"€ojjjjj
+Z^Ã K·ğáš$¶´HP
+:GäLğñğá8øğÿàÃCÏ:-‹v--ê rYøâ×³ù npä€‡çìƒIùè/G)—GFFFFF_÷×Õ	'ìÏd×íïy°BdDòô}äC˜OhÁÚ3c0<#TH
+>ú“O>ùä“O²|8|<D»Î“€Â¬8ûÈ¡·‘®.é—Å—ğ¨‰| F>zrßóœµãµM“ÃÈøôÓO?ıôÓÀ¿òÊ+¯¼òÊ,>ëx8>‰şØ·ÇÇşà/PäJœoö¥Q:E¹ë¹EÒ¡zóæo¼ñÆo,õ9ğÁ¡İ¿nÅˆ+Œ\à2Ó´ğæÍ÷ÜsÏ=÷ÜS,Ê°ïù t(zyç€ÇD>^©wÙ|ğÁ¥>ƒë47Ÿ={x> 9…¬övyÊš51ĞÈõ0_ˆ`aˆñ|âÿúÜÚªĞ|<ùÎÆç
+{ßûR5ÿO;vk«:¤¹YŸëëõÿĞŸ•GÎ.—Û	<·ú{>„"Zs³"O}½®|Ï;pÒ9ĞÏåÎK !|ˆcù ª­E _{÷•·4¿#Y“öµiøpáõôèÿ““zöfñq4Öö™±Æ|­<_¡”aV¬P‡õô¨ıÉI}ù ÜÇZ;#Èij®gä#·'g²2>|¼ä
+|ïxÚ‡ÕCo"’'†p?¸i{— ƒÏ[êÅ Ìîig¹À\ïl|øÜüáøşƒc :‚ëÒ$r¸C€O>‚G4_âE~FFˆå:Ï§p9Óó!|À!'íòÇ"ÏÀ3§<|>§3…fgº`lLù 4Ht¤g¸xGš¯Ç $øhøpu@ğñC„!€9ø<•ãœ‰ÁÇ«ıÀW{	<apFì#(şïì$ø!»T«šÄÍÌHÚZîw\u>P	ñyÇÀAöOÌG€ÑQøx	|<!Ã“˜ÔĞAû†§¹# +)ù šôtv2ùÁãi<ç»qXp1Ÿ_†|udg§w°?k=çÃéb‚O>€ô*ÉÇğ|ô'òø\Çâz@îHŠ$•Š>W*ó/J‡Ë ııš=>òˆ§8yÆ‚€<ê‚¤Y»ÁÁwŞyçwŞ!ÍsjJŠô÷k¤?òˆ?ãèhÅıµ9}Î¢Ïƒƒ{öìÙ³gOà«CúûåxŸ&›Bğ ÌÒ-tvR÷Š|Àwz—ïDúyıæı€ıßÿı÷ßjª6X©¤‘¾n>Ú@Ã„f€¹Î–âY>:=r‚—6nôI¦ÀôRp8¦O^áãÂGµ¿q£¿Ux6rzkX6Àñ	òó²# /)‡ò×f®÷ÄÉ‘ÅÏäÀGÃÇÃGç)ÆHHÏ2Ããdğ¡!E˜íÛ?ûì³Ï>ûlñ|8|¼‡XÏğI“óáR|a|0ôw|ÏPò·<ú>òÂ'A8]]ÂikóÌ¬t¢I6 ıö34$;dñÌĞHd…nËM¾‚O§1– ‘ ¥Ï¥óáj¿¯O“¤-[ôº|x:u*øpğµäÜß¯gì?çã5Û|_ñÓú“ 9úûEJ-_ú…şäcø#’|ô×ıšüõ÷kóú"à¿æÃ…×Ø¨™›“¡ÇÇ5ÒN=¾>›ğ_áËîÙ|Œ¥â/:@[‰¦¦ô–|xz²|øbùèÅğáïù§*€|Íúƒ÷¤HS(¼øâ‹/¾øâOrésÏ=÷ÜsÏ-ÜnnX»víÚµk‹E-ÙBÅş|øp:‚‡ÿúë¯¿şúëRIY¨‹çÃo¾ùæ›o¾¹XÔÊ_ä#äåPÀñ÷îİ»wïŞRIo‹ÇïéééééÉÖpıyTG° õØŸ¿TıE‹zİ|êx>öŸú Øÿµ×^{íµ×‘ Íştøp^`Ç`¡`«˜0ù‚Ö3¨\ÖÎ¶mª\‘Ï‡«ã›š„›İïÛĞ}ô!z«ü…øxğ=<ğŸŸÉú{}UÉÇ§>ùèİYyåuØó!x-fıb¡|ˆcoğÑ¾? :€‡‡ÍÛ¯#øxö§ûş|ÑÍuuR4òPĞi`§¥Á¥CÀWh>\hl|Eº,¾'¢x>â´4‘IzwtH–ÍU²øÔgĞıïùà©B–Î« ·„¬ı9Àš5kÖ¬YÓ×§²|8
+Òñœ=3Å7¨ ÏY>œıù^€v= \ßODHw@ìÏ×÷Ù| ğeøÈG CÑ<"Ÿg9}ÍÅë#¸şJ¬ÉÖpôÈË€ÀQÀ÷ú nô_&€†İ°u«ïË'´ ×àÿÎ;ŸNÛ¼™gûóe†ÈGÀ€´çù.‡ãñš.B> 9êàÀw\ÀùxôvŞ\î£ƒÈ‡PêY¶>€¯ì1Éó¥vÏ×ğ<äD¯pçwŞyçÅb÷jò|Á‡…ÏpáYËÂß;íûíÕÁ±?]!,ò<¯À;Ä·k;}ê»k}Ÿ=ø]]]]]]ÍÍZ Šú ´ãK°yûí=Àù|äá _‘¤¹YsƒÈGğö¥fÏ/ —ûÒ+¯Ùúà+‚47d¨ÈÈKğ€òÊ^’„rú3İaÁGS€ıù¾ôéÛ }Ó)rxş€oGO$ğu|†>´ë¤zcXOÁâzH+ÏGP»Ù| :y}	»øÖ<¿¥â¼ú äc$@ğáîI y0/L€!ò6-ÒaéˆıùŒ”¼­_´^z,Î; ¶Ì7±²?^úPŞ-B;z¤I¤èPhi§Á½ƒ8|v>^vÏÖàìu8|@¤w…œé]Ù¾Éuv¶ ÃŒi.03C¥
+¯@ÁgMïöÃyE:>"@¯Õª¾|7€Ï1¼†;.r8/Îû²äıù:jkéx©´ã	NÇzpV»ïõd‡ÚZ/x±Ôú ^Ñ…|ğÕPH`á"øh:Cø#wVĞ+‹Ğé
+±?_×gùøtM›xò~Š:MëÛÇ=A‘!öçÃÇ³?ß'uéÌÖéã:O%ãœ~T*ú\©È‘²õ°#Èwe{dv–ÿçÕ àX} y`ìO÷Ï{&»§ÄgOÜĞ}?¼gş8> MMÅş|ññà¹aòrÕY|é—İŸï™A>éD?pé0w|ğóê°„‹ş>û÷I­'º¸£—®Løo¿ıöÛo¿}\} øpu\ğñÎ³ãá x¹4w”tHŞ½[eùp]W*É€ÁÇóŸ#íƒï³óô$0? >Şó| øÛ‰gAû\Ê÷çK¿|ıÉ‡ >Bº²“¼ÅÖ `Áú  E²|t^>€ïO‡×ÈÛ¾] ç€ïõ	œ÷Ïî ğáìÿâ‹/¾øâ‹…óàãY¦É{-ô
+!ƒşà‹›ø÷õ<3¯Nƒ×ĞĞòtıñìO÷
+ğÑº>ËGkd-'A“°-[4GX<ÿoóä€ÁÇS ½)“õÈGPHîï×ŞÈŸ€ı™/T€T¿<üœàûãá£Oõş|ğ©@•rò–º?~©øêµk¥wc£=7'9N=¾Û_õ–jÿ%×XˆWÈ)ô{'Oõxàˆıùê€àÃ_¬ßÉÃW½şìşüôd9øø“ßÛÛÛÛÛ;5¥·|ıê±®·›Ø»'"[€zù¼.±Áƒ|{"ö§/µ> {çòò’£^¿ãÃ‡ùå—_~ùe©ôúë¯¿şúëK¯O ïù êˆØŸ¯¿W€şšs,ÿÚk¯½öÚk£>õÈ >€Û_¸ñ{	zôå×'È­@> õò}—,,XšäˆÉïëü^ |übë°?Şó`Á Aaá|İ‚…­µG}‚'xâ‰'X|½~Ïğjéi’%^Ã¨O€şğñı^ù jw×.´l>ışÌ˜’€şä#øï{P¹öüıñ¾?ßó œ¦Lg
+eùhêÕs…øıº:µ—ÿ{t¼óñN[çå¨CËeU.	|´ØŸ¯‘ù ÎÇ“àÛæ}›ºãËQ²ú_}õÕW_}u]:<›ØŸ3õË·©c½-´´H¨ÏpÌØïeÎ=ñÚ3T|­>½dÛÕ¥‘:1ññÇüñÇÁ‡“ Ü‡òmÍœÉCÀğ8rz¤—”c¼ÿ^ øğñ¾½ÚõÅ!Àç:/§ïûóó~¯@	QÁË¼ƒ‹Şş{¬Ìúï5¤7³F>Äÿæeyûãvô­IÎûs‚  ÂYínŞ|Ã7ÜpÃ<c³õ	é´‹GÓ>!7]	#:ÄÃë§¡A¸ÙúàèÍûp¸t ‘	ı5©‹|òÒ´m´‡áeûù¾Ë>sœù*[‘à+_Şñy+ƒŞ¾PC»ìÏgºÖ	‚ÏÃ÷µ~§?}k˜Ó§ÈÍxSèŒúá+|¾'ÏÉ/Ÿ®ŠíèºàãÚC/ël«/…çÌÒu" yş8– í|¼ovt¶‰‚€¾+ÖÙ:øhc>ùâ;ÒkêÁv1ö|êx>BŞş|ß
+çÛß}ë÷1	d­>¯>Áäüëœ÷ù´çE §/{ò!¤Ïqù 'ŞË`Pª_á™ 1”kFçãÕ¡Á‡{] _Z¦=fù´Ç#ÇY3ŞFè°ô1Ÿvh—vp0›§=ß»xâ2ù¹fgYHò%mwxìî©jNšqöß ŸÀë#06¦@n <ÛC£ÿv‚û/‡x½~9JµªÙÿÌŒäˆzıŞ¡xÁ³ıÑ„£€ïùr¨l>Ë}Œ,'{˜t9æu	Ÿ÷uô—Çï%x$óG?Ş¼n öBú| ÖKæŸš$fŒŒH€ÎNçµğ‰cø³Ş+¤iÙÈ~±(œÈGğI¨Ó¯^Ÿ ù¼p…ÓÔğñ’'òÈ‡><ÚÜñ|’L„!ÁœO'¤D>€ì\,êúìï%`oßîKşÖÃ÷ÈáùZ9®> ûÓ¥ø#Ğ‘¾ı˜—®‡×{
+Tš5ÔKHìW{ïo(î„ôşƒl¾Â‰Ù±ÁÁ·Şzë­·Ş
+|H+êøk¬OjÓ²ì[y‰™´Y|9H~}"ÏXy=3*İQŸàØ¼UŠQ1£«K†€Ì>ğ^!½=šÏ»w«£wìPˆz[r¸JEgŞ×?o[´?+}’˜ÎÚ½[#vÇ…æÀWG†şr@Ö-²u\§¡Ol—İ»…»c‡BràK?*¦tuÉ¡ £³¥y|Ná‰/^!Dçİ»yvìĞÊìÌLn> |8ù }ë“/\ññ{ŸşùçŸÏ‡ó{y|¼§ƒû>ı+ù‹­ ¾Ú|Èá‘&¯>€óñO} ¯Oàïûy‘&éB9Ìöí|ğÁ|°„| øh-(Ï[ ¡O×U«2XğñàŸóñàó{ğñ¾qBG6ú !ÿü÷¨×¯¦ÈH“Qñ{èOh×,şŸç#`ôÇşÎ‚¯~Ğß¯¹À)ÈĞ38êõk²õßí—CÂÂë¼w¯qêùxöçëó—¡¹BäC`ÿ¥ş^Ãÿp³.¸Ë¥    IEND®B`‚‰PNG
+
+   IHDR         ®\µU   gAMA  ±üa    cHRM  z&  €„  ú   €è  u0  ê`  :˜  pœºQ<   PLTE   ÿÿÿÿÿÿÿÿÿ   üøz   tRNS Ì@ëå   bKGD ˆH  HIDATxÚí\Ü LË*õ•úZÿÿo•zâ1³&Ùİ»íuF'å’<ÅÆ°m¯†RKõhÁ‡KvJ5G ³
+Ì]NÌ{»ZAbu~½—À¸î,ü³,ÌŞtm*X%í ÁT#	¡ÿ{1dJfÂï„@³ö»•ÛCĞ4WÌ«Êà>%Ğ+”&¹‰Il`U™ÉŒ±ì]¯+–m HgÁÛƒ0Ù4¤Ó}‘@³ş~@#Ì^DËÊjA‚ÓoÈGAA„èzõÏğö|ÿ¡{J\0(R®m>ğĞîûóıOç@,”¢êìnÈİšÃAOÀ ©œÀÜ•;hNhuÜaBÀá:oÆ¼;¸Û@ Qô.™±wåz‡¦a(‡Tª÷t!†N 9|2Lø‚#°p› u7{GÍÖxÌó`<k’`Ø¤Gó†-%@Âw, ÑË‰S9¾ˆÂÇ°şTa{<>ÒŠ¸;. ‚ ‚ ïüÜ¶p_Ûóz¼Ÿ°Çš7íÚú÷Ï¹rÛæ²k´Á•xÅÁk¾-§»ç9‘³€x5B dÿ{ €®^Âš0›
+¶0o8€İ.Ç›Õ [J µƒõ®AbÄÛF›{¸3ÂÄÍØ4å§aÁ±Ï^D{ƒìEÂ}6×ğÙÀ¦ ‚ ‚ |"„uÃ4>ğöÏ‚ãb{ùºWôòº¯Öo7ŒK´\ö‹á6ho^nì;Àõz'÷øÏª®nñ5!­Ÿ:—MnX‡1`ÀÇ3X3yôÒù±ç)ÔêhÑ2HçòbòÇm˜˜ÀÔ98ä«zèd’¦ûP4™†
+l%85![m)<=£àµ`$ëFAáÄ‡¯½Ú·hT0,şc2|ş£s{öÛ3%À6^3g5|™ kg• ÑLÙˆ™Ø»Ä&h¾ªn¤ıĞÓ4dCR?âà±¤½ƒ  ´J #64 R'Rè›ŞM`|/ ÕÓm ™½]°Ô9>GÈ˜Oğˆ|>˜ U¡R3AA^Å¶“ßlW?ñ
+.ûíÍ…ãıE lp®ûãû#wˆåĞß/İªÇßs×mîÄæBĞñå­ ~\E®ÊĞP…âŒ œÔËhõ@YÃ$]ÿ>¸Ï ‚ÆM ÷8Ù™q}ÀófE?´#æÔ½^+à6C/ãbıOC@[6AAøw1Å/©–$õ2®}Ù™¬©w¶ìq8,8§›»ßÈız`íªgJÌM_#ò¢=…)Áè/j¢¤6×^ØÌ^Ù,á÷oH`¿‡ø®Ìr·5–ÁØrLv§Š7Öà'øb¿ˆHây~gCpÏÏ¸f„uïoãç·ï?N¸Úq–Àïí«oø%ãî72Ï±Öÿ0rŸlù<p:á‹öÕ’ğAAw^‚	‘–T_İX/„o;Ègûiº>ÖËÜ‚îD_ÍcXuÿ™&FÇ<óB2ªÃâ4ì˜œìæ®ûí~™|V'ù àœf¾b{‚§õ‡|‚ƒLbîyJ`hh®$#$6'€ûHª¯¶_&ÀzD4À#üç‡  ‘³ŠŒ@|_Tw	gUàş8æçNÎ3Uos¬;—î~’wñÉpàuññÌ˜÷%@õÎ˜AA¸ TqÒZš    IEND®B`‚‰PNG
+
+   IHDR          w }Y   bKGD ÿ ÿ ÿ ½§“   	pHYs     šœ   tIMEİ	Z”‡Ô   iTXtComment     Created with GIMPd.e   IDATHÇí•±Å Cå¬dfb(Í„fJ*§àCH‘_ |èÙ>l+¥ì R2LTøn$!é<˜¡œó.	 °ác-€° ,ş¥»Ãİ_Hµ×T`VZÖxr?Ä˜—ô“ õ(œ =ÅC£=s_HZ³5Ä wÉa\ Ôæ]€äâ$‡-h‡’EM­Êù%    IEND®B`‚‰PNG
+
+   IHDR         k¬XT   gAMA  ±üa    cHRM  z&  €„  ú   €è  u0  ê`  :˜  pœºQ<   „PLTE   ÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿ    eÀÃ   *tRNS îíÒÓ·¶œ›€dHI-,cÌäÂŸ |}GZY7+¸¹‚gL1?TåG   bKGD ˆH  
+PIDATxÚím“ÛF„Go”Di%J—8¹\’K|ÉOÿÿ†ÅĞ€ ÒZm¹ì~j½ÅÌ`†ëİJ!	—Ëõ_°â32~Ñèâ †7¸”h}?¸Dùİßô³™ÍçıÌ\Eçsµz&ÇóY™©ı³Ünò)LrÂb‘Då‚å²è	ˆƒ~Í¤ãáúÇY.âøª‰‚M#ÆÅ,oV:İªDØãšF‡½bçËÉ¬7Qt³~Ô0Ü¿6áÚ9áé¤û·mİ–v«Æ-lØnqy˜°5Q¹~Û¶ı~1Ñn‚Ë÷ë“7£=»]¬¨)½‚»$¡Å»lÃ$Ü^ö/åe¯g†9µ`[0¬Ua›pÎèt5e˜.åeŸ­8’¨\0õÄq˜8~‡h˜Ğœ—,·ûI\å;æÙ».‰:5>uì–§~uœ±t§ñÇ§Û_==!„B!„B!„¯‰Ë|”ë/(÷Gÿåâm(÷ãcò?ó}«8¯û™Í‹Rğkp®ı¹ĞÛô>s´x1WMş‰Ùlt¬^]æ¯Z¹ä—K-ï!1Sµ¤¿Xˆ1jï®Ù ó-a&àßO—FÍıí½Ñı*üå‡Šo6kê³öày&%ÜFQíÁûÔÍ2ÃfSÖ À€Ñë7}²µölbß¬wŒ®3Â.&h{@¢Gı¼5j¼XQƒ(ñı¾>êjuI½~€ŒÀ+pçôûí¬€º£§‹)Ç/ ñæß#&Iøgt˜ûàğ,GU{×’¹–ãAN¯C”ôÑ  ş ­èÃa/öŒÄP€d‚ÿ>ŒW¹\+ìJOwÅû@Ñ¯Bƒ·ù¹òàú¿ñ3CC8ÑÀX õ_-Ğás÷óNz\`w=OAï7c<>ÔüÍeB!„B!„B!ß‰>Çpä0Ãbë _Aå+àG€×¿İü™? õÿÌ0Œ¡~€bæ€“BMÌ½ır­÷>bìú–ÂP…>Ÿù–ÏüËE	ıN
+e_å¬50xî?ˆïTĞQŸ¿ê÷+¸ëe<÷Ñà¤P}>•¢1÷Ñş€Õª±÷G€ÌQŸ_ƒ¾ïjíèPqk'ĞûÀºKT…õf™6ú}6›èı±^ùª</4÷«~~ ú¶÷­Ç­Í¿5)ÕUO ^\×nÕ}†Š:.7ívúûÔóİq)ÓâÑzë0î 9±«Øüç®@`ü
+ûú}¿ĞóA¯¯R½ĞëÑpC\`¤ÿ½“?ğ'ÔûíõX.wóïïç7ş†c¢ÿ£ŞïÅ¡€"ËïøŒ?á(õYŞÇ3ˆ˜¿ÆÕ¦NúõÑøôz)°£] Ã|øqw»A)¶ Ğ> ÷ëtƒúˆçëO,!@!„B!„B!_1Iw„×ğˆW¿Ÿ:.2_\ÀëV` €GıÔ}W¿?AZ? U¨op?vgyT_ ëŒòhÔ”ÉWõÿ%Ä¡ÔøÑ ğiÓ½<ØŸ jïø
+èù&_£7™ú ıó
+Ê èöÏ¡P¢!¨—[½¿hŞÖPêş:Égë€à_l~=LÊ”‰ÚZ¿ÿ6¾êëR¿GE¾ 	@·€ıÃ„Ê¿-­ö´m\¯ M¶AÁ˜’ŸÈõş¸~ Œş‚¾ù¾ÿ¼‹„nàÆ‚×;ş µÄ©°‰â{İ~`?ô' Ê€sC½á~ù‚G¿?Pÿ?ªxªçë¤Ÿè07L¦²†
+£•Ã÷ü¾õôëh? ~:2(?Àà@‚ñ@ß‰B!„B!„Bn¼A·÷/ş"FıurÂ”­v*¨PÓ?ó ?í¿CØ ÎàH÷6Û,è_«ÿ3JküO©şÿY÷™š"aøş^ÕÿĞq(ØßÇ•Ş¿’Ãác~¥àÊ€í §~€ğØzNu½Ü¿Y¥şÀ0ÎOp¿b€¿?® -ëMÜ`ÀÖ(‰?yú ÿËõ[¨0¦~ äGù_0Ô€ú*£©€<^? ëû;rÿÄú‰_OÛaı€¤ßfTı ¹>©€êıÔú8Ó?¢AàüûIõÏ©`Æ6ãİõ™?à¶èïÇ£®'P°{Á±¦Õ@Üş:n>÷ú˜~§°^© )²õ}¼cı B!„B!„Bùf©êùSô7÷WØşA´]ÇsåùçÍ¢–×òÏu¼®<?ı¼¼ @D£åú¿ıª~€ÖÿWÚ@PGÊOP&ÕÀş¯é›¨£€ma€ş‚\ïß„õüqfjı€Mâ?(ìÚKà^ibı€êûX<ÀJëº˜ î¯­·X_@æÜ‚ßÀ™Öh§”˜ì((ÿ'ú¿­PL‡€°ş@^à¡òF¯wıî¦O;”Ø×(ûÔ@?‚½€©à¶ÍU?¿éå¹Ş“G+îÇõ‘?àºÿèåÏ˜Ş•ïÒuVÿ×ş »ŞÔ0ş€N‡U‚¤¿ ö0õ
+ÖĞCV „B!„B!„„Øâí%ª&ïï@|ÍÎ{¶¶ë¾ÑuŞ³ï“üšúş—¸~¿ß/à~ÜWŞÖr€ı1]~ñ_ÿVÜçÍg˜_îâ¯ªïÿCFõ,°?€Ó_ Ú8çA¿qŞÆ·ÉWã;5Õ_@0¢¿€i ÷7yş°¿À£l¾Ï¿ç¬¡Ü¿£½C¸@Mœçø&ÉıïŞ½û¡ÿw›¸ö €À©°mÃşZ¿G5ğ´ÚĞÆş Ó>à1Î?şóÇ³ª¬/Î÷û™º¿ñü¯ÊOÿúùçŸÄxª?`Lÿx.BÀ4±?ç—_ÿ]¿şr›˜ê˜Ú_à˜ìŸîxŒß~ïışÛm¢ªé¨ï«ş ÷€şóâ¾©œ‡ù !„B!„B!„7åënH;2ÃˆIº¤	üƒ»…ó|^Ãù?¿×–A¿ŸËtæóXİŸA¾şÀyŸ¹şüÁ„!”?ªEÁø–ÃÏĞÍ°\ª·~€Œ{ı´ üh
+€ôPï¿ÑYı€÷ïÿó¾G½¡¶ZkqHû„ß÷ƒ? ­ÿ_&úÔ\I¸¶ã1ş ì/úlı÷ú`<¨ğçÜ*¿AµÀıà•t4÷è‚¹? ­ÿ¯gÎzGV?à¿WDô÷3ÎøJÒáûd|º? «ÿ?É`.ğ¿àh(xyÙï£şÏğÀıÖ?à&¡?àÃ‡0ÇAôp€0ì¬ş¯ôz·¿€šı¶¼€w®? SÙÁğÿ2,@·!„B!„B!ß0jß¼Ò-    IEND®B`‚‰PNG
+
+   IHDR   @   @   ªiqŞ   bKGD      ùC»   	pHYs     šœ   tIMEİ	Z×ş  ×IDATxÚíÛİJAÆñÿ–¦…}A+DtİE']e'İEâB‘eÙvò
+ÃÒÚ~Ìî>ƒ‚Š>¿}}GÙ(MÓ”°#
+ùæ+,ù€   @ €   @ €   @ €   ,ÃèøÿyU€   @ Aû Ÿ£¬ì'0¾úì10²ûc 		ĞÖ€ü¤‡¿°	pk3i` ômë(;À;ğ|4şÊˆˆ¤€!°ZÙ÷í¨O‰´~üÂyN)„² {Àpbe¿k¥>³àÓ×«¼ğîc¥Š ûÀ¹•ı±-v‘Ÿ4¼©Z¾B€K;òCàX·²Ÿ''|ä	¥HøÊE†ö=ïe‚³ dj³î9+~\,qfíFhÑ‘L3·¾+ x#tã|Îì|ß-ğ:_0¶RVAâôc_ î"¸	9‹`^•øª€y œS^üÇs¯}.‚ ÷6ïrNƒM"¥ÃWém>d¡õş¡*…¯Ó	>Û|Ê´Âİ[à<ª†÷±xµùòËfhÖBRw3y¾jîßm‡£ğ—ê!@ €  È{öb>aI    IEND®B`‚
+local keybind = {}      -- Map key names to functions.
+local keystate = {}     -- Keep track of key state.
+
+--
+-- Unbind all keys.
+--
+local function UnbindAll()
+        keybind = {}
+end
+
+--
+-- Execute function bound to key.
+--
+local function DoKey(keyname, pressed)
+        local binding = keybind[keyname]
+
+        -- Update key state.
+        local wasPressed = keystate[keyname]
+        keystate[keyname] = pressed
+        
+        local function xor(a, b)
+                return ((a and not(b)) or (b and not(a)))
+        end
+        
+        -- Be sure to ignore repeat `key-down` events and also
+        -- `key-up` event if key was not previously pressed.
+        if binding and xor(pressed, wasPressed) then
+                binding.func(pressed, unpack(binding.arg))
+        end
+end
+
+--
+-- Execute function bound to joystick button.
+--
+local function DoJoyButton(KeyFn, joy, button, pressed)
+        KeyFn("Joy"..joy.." B"..(button+1), pressed)
+end
+
+--
+-- Execute function(s) bound to joystick axis.
+--
+local function DoJoyAxis(KeyFn, joy, axis, value)
+        local neg = "Joy"..joy.." A"..axis.."-"
+        local pos = "Joy"..joy.." A"..axis.."+"
+        
+        local deadzone = 0.3
+        if math.abs(value) < deadzone then
+                KeyFn(neg, false)
+                KeyFn(pos, false)
+                return
+        end
+        
+        if value < 0 then
+                KeyFn(pos, false)
+                KeyFn(neg, true)
+        else
+                KeyFn(neg, false)
+                KeyFn(pos, true)
+        end
+end
+
+--
+-- Set/restore normal key handling.
+--
+local function RestoreNormal(KeyFn)
+	KeyFn = KeyFn or DoKey
+        eapi.BindKeyboard(function(key, pressed)
+                KeyFn(key.scancode, pressed)
+        end)
+        eapi.BindJoystickButton(function(joy, button, pressed)
+		DoJoyButton(KeyFn, joy, button, pressed)
+	end)
+        eapi.BindJoystickAxis(function(joy, axis, value)
+		DoJoyAxis(KeyFn, joy, axis, value)
+	end)
+end
+
+--
+-- Bind key name to function that's executed when corresponding key is
+-- pressed or released.
+--
+-- keyname         Key name or a list of key names.
+--                 For keyboard keys see SDL/src/events/SDL_keyboard.c file.
+-- immediate       Execute function immediately if key already pressed.
+-- fn              User function. Use `nil` to remove binding.
+--
+local function BindKey(keynames, immediate, fn, ...)
+        if type(keynames) ~= "table" then
+                keynames = {keynames}
+        end
+        
+        -- Set functions that handle all key presses (if not already set).
+        if next(keybind) == nil then
+                RestoreNormal()
+        end
+        
+        -- Create/remove entries in `keybind` table.
+	for i, v in ipairs(keynames) do
+                -- Key name may be the key's scancode, its scancode name or a
+                -- joystick button/axis name.
+                local name = v
+                if type(name) ~= "number" then
+                        name = eapi.GetKeyFromName(v) or v
+                end
+                
+		if fn then			
+                        keybind[name] = { func = fn, arg = arg }
+                        
+                        -- Simulate `key-down` event if key is already pressed.
+                        if immediate and keystate[name] then
+                                fn(true, unpack(arg))
+                        end
+		else
+                        local binding = keybind[name]
+                        if binding then
+                                -- Simulate `key-up` event if key was pressed.
+                                if keystate[name] then
+                                        binding.func(false, unpack(binding.arg))
+                                end
+                                keybind[name] = nil
+                        end
+                end
+        end
+end
+
+--
+-- Wait for any keyboard key or joystick button press and execute argument
+-- function once that happens. Normal key handling is restored afterwards.
+--
+local function WaitAnyKey(except, fn, ...)
+        if type(except) ~= "table" then
+                except = {except}
+        end
+
+        local function AnyKey(pressed)
+                if pressed then
+                        fn(unpack(arg))
+                        RestoreNormal()
+                end
+        end
+
+        eapi.BindKeyboard(function(key, pressed)
+                if util.HasValue(except, eapi.GetKeyName(key.scancode)) then
+                        RestoreNormal()
+                        DoKey(key.scancode, pressed)
+                else
+                        AnyKey(pressed)
+                end
+        end)
+        eapi.BindJoystickButton(function(joy, button, pressed)
+                local name = "Joy"..joy.." B"..(button+1)
+                if util.HasValue(except, name) then
+                        RestoreNormal()
+                        DoKey(name, pressed)
+                else
+                        AnyKey(pressed)
+                end
+        end)
+end
+
+--
+-- actions = { "Shoot", "Bomb", {"Left", "Right"}, {"Up", "Down"} }
+--
+-- PreFn(actionNumber, actionName)
+-- PostFn(actionNumber, actionName, keyName)
+-- FinishedFn(controls, cancelled)
+--
+local function SetupControls(actions, PreFn, PostFn, cancelKey, FinishedFn)
+        local controls = {}     -- Resulting controls: action -> key
+        local usedKeys = {}     -- Keys already used: keyname -> true
+        
+        -- Inform user about first action.
+        actions = util.DeepCopy(actions)
+        local actionNumber = 1
+        local firstAction = actions[1]
+        if type(firstAction) == "table" then
+                assert(#firstAction == 2)
+                PreFn(actionNumber, firstAction[1])
+        else
+                PreFn(actionNumber, firstAction)
+        end
+        
+        local function DoBinding(keyname, opposingKeyname)
+                -- Check if key has been already used previously.
+                if usedKeys[keyname] then
+                        return
+                end
+                usedKeys[keyname] = true
+        
+                local action = table.remove(actions, 1)
+                local opposingAction = nil
+                if type(action) == "table" then
+                        assert(#action == 2)
+                        opposingAction = action[2]
+                        action = action[1]
+                        
+                        -- If no oppsite direction key exists, put the opposite
+                        -- action as next (regular) action.
+                        if not opposingKeyname then
+                                table.insert(actions, 1, opposingAction)
+                                opposingAction = nil
+                        end
+                end
+                
+                -- Do control assignment.
+                controls[action] = keyname
+                
+                -- Inform user that action was successfully assigned to key.
+                PostFn(actionNumber, action, tostring(keyname))
+                actionNumber = actionNumber + 1
+                
+                -- Handle opposing action.
+                if opposingAction then
+                        PreFn(actionNumber, opposingAction)
+                        controls[opposingAction] = opposingKeyname
+                        PostFn(actionNumber, opposingAction,
+			       tostring(opposingKeyname))
+                        actionNumber = actionNumber + 1
+                end
+                
+                if #actions == 0 then
+                        RestoreNormal()
+                        FinishedFn(controls, true)
+                        return
+                end
+                
+                -- Prepare user for next action.
+                local nextAction = actions[1]
+                if type(nextAction) == "table" then
+                        assert(#nextAction == 2)
+                        PreFn(actionNumber, nextAction[1])
+                else
+                        PreFn(actionNumber, nextAction)
+                end
+        end
+        
+        -- Inspect keyboard keys.
+        eapi.BindKeyboard(function(key, pressed)
+                if not pressed then
+                        return
+                end
+                local keyname = eapi.GetKeyName(key.scancode)
+                if cancelKey and keyname == cancelKey then
+                        -- User interrupeted.. restore normal key handling.
+                        RestoreNormal()
+                        FinishedFn(controls, false)
+                        return
+                end
+                if not keyname then
+                        keyname = key.scancode
+                end
+                local opposite = {
+                        Left = "Right",
+                        Right = "Left",
+                        Up = "Down",
+                        Down = "Up"
+                }
+                DoBinding(keyname, opposite[keyname])
+        end)
+        
+        -- Inspect joystick buttons.
+        eapi.BindJoystickButton(function(joy, button, pressed)
+                if not pressed then
+                        return
+                end
+                DoBinding("Joy"..joy.." B"..(button+1))
+        end)
+        
+        -- Inspect joystick axes.
+        eapi.BindJoystickAxis(function(joy, axis, value)
+                -- Compose complete axis name.
+                local axis = "Joy"..joy.." A"..axis
+                
+                -- Make sure user cleanly pressed in the axis direction.
+                if math.abs(value) < 0.8 then
+                        keystate[axis] = false
+                        return
+                end
+                
+                if not keystate[axis] then
+                        local dir, opdir = "+", "-"
+                        if value < 0 then
+                                dir, opdir = opdir, dir
+                        end
+                        DoBinding(axis..dir, axis..opdir)
+                        
+                        -- State: pressed.
+                        keystate[axis] = true
+                end
+        end)
+end
+
+--
+-- Bind user function to a certain action (actions map directly to keys).
+--
+local function BindControls(binding, actions, immediate, fn, ...)
+        if type(actions) ~= "table" then
+                actions = {actions}
+        end
+        
+        -- For each action..
+        for ai, action in ipairs(actions) do
+                local bind = binding[action]
+                if bind then
+                        -- ..bind each key associated with this action.
+                        if type(bind) ~= "table" then
+                                bind = {bind}
+                        end
+                        for ki, keyname in ipairs(bind) do
+                                BindKey(keyname, immediate, fn, unpack(arg))
+                        end
+                end
+        end
+end
+
+local function Bind(actions, immediate, fn, ...)
+	BindControls(Cfg.controls, actions, immediate, fn, ...)
+end
+
+local function ResetState()
+	for i, _ in pairs(keystate) do
+		keystate[i] = false
+	end
+end
+
+input = {
+        ResetState      = ResetState,
+        Bind            = Bind,
+        BindKey         = BindKey,
+        WaitAnyKey      = WaitAnyKey,
+        SetupControls   = SetupControls,
+        RestoreNormal   = RestoreNormal,
+        UnbindAll       = UnbindAll,
+}
+local store = { }
+
+local function Square(x)
+	return { b = -x, t = x, l = -x, r = x }
+end
+
+local function GetPos(actor, relativeTo)
+	return eapi.GetPos(actor.body, relativeTo or gameWorld)
+end
+
+local function MakeTile(obj)
+	local offset = obj.offset
+	local size = obj.spriteSize
+	obj.tile = eapi.NewTile(obj.body, offset, size, obj.sprite, obj.z)
+	return obj.tile
+end
+
+local function MakeShape(obj, bb)
+	local shape = eapi.NewShape(obj.body, nil, bb or obj.bb, obj.class)
+	obj.shape[shape] = shape
+	store[shape] = obj
+	return shape
+end
+
+local function Create(actor)
+	actor.shape = { }
+	actor.blinkIndex = 0
+	local parent = actor.parentBody or gameWorld
+	actor.body = eapi.NewBody(parent, actor.pos)
+	actor.blinkTime = eapi.GetTime(actor.body)
+	if actor.bb and actor.class then
+		MakeShape(actor)
+	end
+	if actor.sprite then
+		MakeTile(actor)
+	end
+	if actor.velocity then
+		eapi.SetVel(actor.body, actor.velocity)
+	end
+	return actor	
+end
+
+
+local function DeleteShapeObject(shape)
+	eapi.Destroy(shape)
+	store[shape] = nil
+end
+
+local function DeleteShape(actor)
+	util.Map(DeleteShapeObject, actor.shape)
+	actor.shape = { }
+end
+
+local function Delete(actor)
+	if actor.destroyed then return end
+	util.Map(Delete, actor.children)
+	util.MaybeCall(actor.OnDelete, actor)
+	DeleteShape(actor)
+	eapi.Destroy(actor.body)
+	actor.destroyed = true
+end
+
+local function Link(child, parent)
+	if parent.children == nil then parent.children = { } end
+	eapi.Link(child.body, parent.body)
+	parent.children[child] = child
+end
+
+local function SimpleCollide(type1, type2, Func, update, priority)
+	update = (update == nil) and true or update
+	local function Callback(shape1, shape2, resolve)
+		if not resolve then return end
+		Func(store[shape1], store[shape2], resolve)
+	end
+	eapi.Collide(gameWorld, type1, type2, Callback, update, priority or 10)
+end
+
+local function DelayedDelete(obj, time)
+	eapi.AddTimer(obj.body, time, function() Delete(obj) end)
+	DeleteShape(obj)
+end
+
+local function BoxAtPos(pos, size)
+	return { l = pos.x - size, r = pos.x + size,
+		 b = pos.y - size, t = pos.y + size }		 
+end
+
+local function LoadMisc(frame)
+	return eapi.NewSpriteList({ "image/misc.png", filter = true }, frame)
+end
+
+util.white = LoadMisc({ { 8, 8 }, { 16, 16 } })
+util.rhombus = LoadMisc({ { 40, 40 }, { 16, 16 } })
+util.triangle = LoadMisc({ { 8, 40 }, { 16, 16 } })
+util.transparent = LoadMisc({ { 40, 8 }, { 16, 16 } })
+
+local function ESC(keyDown)
+	if keyDown then
+		if state.level == "startup" then
+			eapi.Quit()
+		else
+			util.Goto("startup")
+		end
+	end
+end
+
+input.Bind("Quit", false, ESC)
+
+local function FillScreen(sprite, z, color, body)
+	body = body or staticBody
+	local size = actor.screenSize
+	local offset = vector.Scale(size, -0.5)
+	local tile = eapi.NewTile(body, offset, size, sprite, z)
+	if color then eapi.SetColor(tile, color) end
+	return tile
+end
+
+local function LoadSprite(fileName, size)
+	return eapi.ChopImage({ fileName, filter = true }, size)
+end
+
+local arrows = string.char(157) .. " and " .. string.char(156)
+
+actor = {
+	store = store,
+	arrows = arrows,
+	BoxAtPos = BoxAtPos,
+	MakeShape = MakeShape,
+	FillScreen = FillScreen,
+	SimpleCollide = SimpleCollide,
+	DelayedDelete = DelayedDelete,
+	DeleteShape = DeleteShape,
+	LoadSprite = LoadSprite,
+	MakeTile = MakeTile,
+	Create = Create,
+	Square = Square,
+	Delete = Delete,
+	GetPos = GetPos,
+	Link = Link,
+}
+return actor
+local fallSpeed = 96
+local rollSpeed = 64
+
+local function IsFalling(bead)
+	return eapi.GetVel(bead.body).y ~= 0
+end
+
+local function IsRolling(bead)
+	return eapi.GetVel(bead.body).x ~= 0
+end
+
+local function Sound(fileName, volume)
+	eapi.PlaySound(gameWorld, fileName, 0, volume or 1)
+end
+
+local red = { r = 1.0, g = 0.0, b = 0.0 }
+local sparkColor = { r = 1.0, g = 0.8, b = 0.0 }
+
+local ballImg = actor.LoadSprite("image/ball.png", { 16, 16 })
+
+local function Ball(pos)
+	local obj = {
+		class = "Ball",
+		sprite = ballImg,
+		offset = { x = -8, y = -8 },
+		spriteSize = { x = 16, y = 16 },
+		bb = actor.Square(1),
+		pos = pos,
+		z = -2,
+	}
+	obj = actor.Create(obj)
+	eapi.SetVel(obj.body, { x = 0, y = -fallSpeed })
+	eapi.Animate(obj.tile, eapi.ANIM_LOOP, 32, 0)
+	kule.Push(obj, kule.elements)
+	Sound("sound/thunk.ogg")
+end
+
+local function Drop()
+	ball.DisableInput()
+	local pos = eapi.GetPos(ball.cursor)
+	Ball(vector.Offset(pos, 0, 24))
+	eapi.Destroy(ball.cursor)
+end
+
+local function ForbiddenLeft(dir)
+	return dir < 0 and ball.place == 1
+end
+
+local function ForbiddenRight(dir)
+	return dir > 0 and ball.place == #ball.entries
+end
+
+local function Move(dir)
+	return function()
+		if ForbiddenLeft(dir) or ForbiddenRight(dir) then
+			-- TODO: angry sound
+		else
+			Sound("sound/click.ogg")
+			ball.place = ball.place + dir
+			local cell = ball.entries[ball.place]
+			eapi.SetPos(ball.cursor, kule.GetPos(cell))
+		end
+	end
+end
+
+local function Create(pos)
+	local down = string.char(158)
+	local offset = { x = -4, y = -4 }
+	ball.cursor = eapi.NewBody(gameWorld, pos)
+	util.PrintOrange(offset, down, nil, ball.cursor, 0.2)
+	ball.EnableInput()
+end
+
+local function DisableInput()
+	input.Bind("Drop")
+	input.Bind("Left")
+	input.Bind("Right")
+end
+
+local function EnableInput()
+	input.Bind("Drop", false, util.KeyDown(Drop))
+	input.Bind("Left", false, util.KeyDown(Move(-1)))
+	input.Bind("Right", false, util.KeyDown(Move(1)))
+end
+
+local function Arm()
+	if #ball.entries > 0 then
+		local middle = math.floor((#ball.entries + 1) / 2)
+		ball.place = ball.place or middle
+		Create(kule.GetPos(ball.entries[ball.place]))
+	end
+end
+
+local function MakeTurn(cell, store)
+	local obj = {
+		class = "Turn",
+		bb = actor.Square(1),
+		pos = kule.GetPos(cell),
+		direction = kule.TurnSide(cell),
+		offset = { x = -8, y = -8 },
+		sprite = util.transparent,
+		cell = cell,
+	}
+	kule.Push(actor.Create(obj), store)
+end
+
+local function BallTurn(bead, turn)
+	eapi.SetPos(bead.body, eapi.GetPos(turn.body))
+	eapi.SetVel(bead.body, { x = rollSpeed * turn.direction, y = 0 })
+	if turn.direction == 0 then kule.Fail(bead) end
+end
+
+actor.SimpleCollide("Ball", "Turn", BallTurn, false)
+
+local function SwitchTile(obj)
+	eapi.SetFrame(obj.tile, (obj.direction > 0) and 0 or 1)
+end
+
+local gateImg = eapi.ChopImage("image/gate.png", { 16, 16 })
+
+local function Switch(cell, direction)
+	local obj = {
+		class = "Switch",
+		bb = actor.Square(1),
+		pos = kule.GetPos(cell),
+		offset = { x = -8, y = - 8 },
+		direction = direction,
+		sprite = gateImg,
+		cell = cell,
+	}
+	obj = actor.Create(obj)
+	SwitchTile(obj)
+	return obj
+end
+
+local function SwitchDir(switch)
+	return { x = switch.direction, y = 0 }
+end
+
+local function BallSwitch(bead, switch)
+	if IsFalling(bead) then
+		BallTurn(bead, switch)
+		local pos = actor.GetPos(switch)
+		switch.direction = -switch.direction
+		sfx.SwitchFlop(pos, SwitchDir(switch), 90, sparkColor)
+		Sound("sound/metal.ogg")
+		SwitchTile(switch)
+	end
+end
+
+actor.SimpleCollide("Ball", "Switch", BallSwitch, false)
+
+local function MakeChute(cell, store)
+	local obj = {
+		class = "Chute",
+		bb = actor.Square(1),
+		pos = kule.GetPos(cell),
+		offset = { x = -8, y = -8 },
+		sprite = util.transparent,
+	}
+	kule.Push(actor.Create(obj), store)
+end
+
+local function BallChute(bead, turn)
+	eapi.SetPos(bead.body, eapi.GetPos(turn.body))
+	eapi.SetVel(bead.body, { x = 0, y = -fallSpeed })
+end
+
+actor.SimpleCollide("Ball", "Chute", BallChute, false)
+
+local function Home(cell)
+	local obj = {
+		class = "Home",
+		bb = actor.Square(1),
+		pos = kule.GetPos(cell),
+		sprite = util.defaultFontset.sprites,
+		offset = { x = -4, y = - 8 },
+		z = -5,
+	}
+	obj = actor.Create(obj)
+	ball.homes = ball.homes + 1
+	eapi.SetFrame(obj.tile, 414)
+	return obj
+end
+
+local function RedSparks(pos)
+	for i = 1, 10, 1 do
+		sfx.SwitchFlop(pos, { x = 1, y = 0 }, 360, red)
+	end
+end
+
+local function BallHome(bead, home)
+	local pos = actor.GetPos(home)
+	eapi.SetPos(bead.body, pos)
+	eapi.SetVel(bead.body, vector.null)
+	eapi.StopAnimation(bead.tile)
+	actor.DeleteShape(bead)
+	if not home.occupied then
+		home.occupied = true
+		ball.safe = ball.safe + 1
+		sfx.HomeRays(pos)
+		if ball.safe == ball.homes then
+			Sound("sound/win.ogg")
+			kule.Victory()
+		else
+			Sound("sound/ding.ogg")
+			ball.Arm()
+		end
+	else
+		Sound("sound/bang.ogg")
+		RedSparks(pos)
+		kule.Fail(bead)
+	end
+end
+
+actor.SimpleCollide("Ball", "Home", BallHome, false)
+
+ball = {
+	Arm = Arm,
+	Home = Home,
+	Switch = Switch,
+	MakeTurn = MakeTurn,
+	MakeChute = MakeChute,
+	EnableInput = EnableInput,
+	DisableInput = DisableInput,
+	homes = 0,
+	safe = 0,
+}
+dofile("config.lua")
+dofile("script/util.lua")
+dofile("script/vector.lua")
+
+camera     = nil
+gameWorld  = nil
+staticBody = nil
+
+state = { progress = 1 }
+if util.FileExists("/kule/saavgaam") then 
+	dofile("/kule/saavgaam")
+end
+state.current = state.progress
+
+util.Preload()
+util.Goto("startup")
+dofile("script/levels.lua")
+dofile("script/ball.lua")
+dofile("script/sfx.lua")
+
+local CHAR_SPACE = 32
+local CHAR_HASH  = 35
+local CHAR_LEFT  = 60
+local CHAR_RIGHT = 62
+local CHAR_HOME  = 120
+
+local function Pos(size, x)
+	return size / 2 - (x - 0.5) * 16
+end
+
+local function GetPos(cell)
+	return { x = -Pos(320, cell.i) + 8, y = Pos(240, cell.j) - 8 }
+end
+
+local function IsValid(cell)
+	return cell.j >= 1 and cell.j <= #cell.level
+           and cell.i >= 1 and cell.i <= #cell.level[cell.j]
+end
+
+local function Contents(cell)
+	return string.byte(cell.level[cell.j], cell.i)
+end
+
+local function Cell(cell)
+	return IsValid(cell) and Contents(cell) or CHAR_SPACE
+end
+
+local function Offset(cell, pos)
+	return { level = cell.level, i = cell.i + pos.x, j = cell.j - pos.y }
+end
+
+local function Left(cell)
+	return Offset(cell, { x = -1, y = 0 })
+end
+
+local function Right(cell)
+	return Offset(cell, { x = 1, y = 0 })
+end
+
+local function Up(cell)
+	return Offset(cell, { x = 0, y = 1 })
+end
+
+local function Down(cell)
+	return Offset(cell, { x = 0, y = -1 })
+end
+
+local function IterateLevel(level, Fn)
+	for j = 1, #level, 1 do
+		for i = 1, #level[j], 1 do
+			Fn({ level = level, i = i, j = j })
+		end
+	end
+end
+
+local function FirstLine(cell)
+	return cell.j == 1
+end
+
+local function IsEmpty(cell)
+	return Cell(cell) == CHAR_SPACE
+end
+
+local function IsWall(cell)
+	return Cell(cell) == CHAR_HASH
+end
+
+local function IsEntry(cell)
+	return IsEmpty(cell) and FirstLine(cell)
+end
+
+local function IsHome(cell)
+	return Cell(cell) == CHAR_HOME
+end
+
+local function IsLeftSwitch(cell)
+	return Cell(cell) == CHAR_LEFT
+end
+
+local function IsRightSwitch(cell)
+	return Cell(cell) == CHAR_RIGHT
+end
+
+local function IsBottom(cell)
+	return IsEmpty(cell) and IsEmpty(Up(cell)) and IsWall(Down(cell))
+end
+
+local function IsFallingSpot(cell)
+	return IsEmpty(Left(cell)) or IsEmpty(Right(cell)) or IsWall(Up(cell))
+end
+
+local function NoFloor(cell)
+	return IsEmpty(Down(cell)) or IsHome(Down(cell))
+end
+
+local function IsChute(cell)
+	return IsEmpty(cell) and NoFloor(cell) and IsFallingSpot(cell)
+end
+
+local function ShadowPos(cell, pos)
+	return vector.Offset(GetPos(cell), pos.x * 8, pos.y * 8)
+end
+
+local function Push(item, store)
+	store[#store + 1] = item
+end
+
+local function WallTile(store, item, offset, size, color, z)
+	item.body = eapi.NewBody(gameWorld, item.pos)
+	item.tile = eapi.NewTile(item.body, offset, size, util.white, z)
+	eapi.SetColor(item.tile, util.Gray(color))
+	Push(item, store)
+end
+
+local function Shadow(store, cell, pos, color, z)
+	local function Border(lo, hi)
+		return function(i) return i ~= 0 and lo or hi end
+	end
+	if not IsWall(Offset(cell, pos)) then
+		local size = util.Map(Border(2, 16), pos)
+		local offset = util.Map(Border(-1, -8), pos)
+		local item = { pos = ShadowPos(cell, pos) }
+		WallTile(store, item, offset, size, color, z)
+	end
+end
+
+local function Wall(store, cell, color)
+	local size = { x = 16, y = 16 }
+	local offset = { x = -8, y = -8 }
+	local item = { pos = GetPos(cell) }
+	WallTile(store, item, offset, size, color, 0)
+end
+
+local function InsertWall(cell, store)
+	Wall(store, cell, 0.6)
+
+	Shadow(store, cell, { x =  1, y =  0 }, 0.8, 2)
+	Shadow(store, cell, { x = -1, y =  0 }, 0.4, 1)
+	Shadow(store, cell, { x =  0, y =  1 }, 0.8, 2)
+	Shadow(store, cell, { x =  0, y = -1 }, 0.4, 1)
+end
+
+local function Switch(cell, direction, store)
+	Push(ball.Switch(cell, direction), store)
+end
+
+local function MakeHome(cell, store)
+	Push(ball.Home(cell), store)
+end
+
+local function When(Check, cell, Insert, ...)
+	if Check(cell) then Insert(cell, ...) end
+end
+
+local function Generate(level)
+	local store = { }
+	ball.entries = { }
+	local function Draw(cell)
+		When(IsWall, cell, InsertWall, store)
+		When(IsEntry, cell, Push, ball.entries)
+		When(IsLeftSwitch, cell, Switch, -1, store)
+		When(IsRightSwitch, cell, Switch, 1, store)
+		When(IsBottom, cell, ball.MakeTurn, store)
+		When(IsChute, cell, ball.MakeChute, store)
+		When(IsHome, cell, MakeHome, store)
+	end
+	IterateLevel(level, Draw)
+	return store
+end
+
+local function Displace(item)
+	local angle = math.random(-30, 30)
+	local pos = eapi.GetPos(item.body)
+	local displace = { x = 0, y = 300 }
+	displace = vector.Rotate(displace, angle)
+	pos = vector.Add(pos, displace)
+	eapi.SetPos(item.body, pos)
+	item.displace = displace
+end
+
+local function Stop(item)
+	eapi.SetVel(item.body, vector.null)
+	eapi.SetAcc(item.body, vector.null)
+	eapi.SetPos(item.body, item.pos)
+        eapi.SetAngle(item.tile, 0)
+end
+
+local function GoIntoPlace(item)
+	util.RotateTile(item.tile, math.random(-360, 360))
+	eapi.AnimateAngle(item.tile, eapi.ANIM_CLAMP, vector.null, 0, 1, 0)
+	eapi.SetVel(item.body, vector.Scale(item.displace, -2))
+	eapi.SetAcc(item.body, vector.Scale(item.displace, 2))
+	util.Delay(item.body, 1, Stop, item)
+end
+
+local function CrumbleItem(item)
+	local angle = -0.2 * item.pos.x
+	eapi.SetAcc(item.body, vector.Rotate({ x = 0, y = -480 }, angle))
+end
+
+local function Rank(item)
+	return item.pos.x + 320 * item.pos.y
+end
+
+local function Test(itemA, itemB)
+	return Rank(itemA) < Rank(itemB)
+end
+
+local function Arrive(level)
+	local duration = 2
+	local store = Generate(level)
+	util.Map(Displace, store)
+	table.sort(store, Test)
+	for i = 1, #store, 1 do
+		local item = store[i]
+		local delay = duration * i / #store
+		util.Delay(item.body, delay, GoIntoPlace, item)
+	end
+	eapi.PlaySound(gameWorld, "sound/arrive.ogg", 0, 1)
+	eapi.AddTimer(staticBody, duration + 1, ball.Arm)
+	kule.elements = store
+end
+
+local function TurnSide(cell)
+	local left = IsWall(Left(cell))
+	local right = IsWall(Right(cell))
+	return (left and 1 or 0) + (right and -1 or 0)
+end
+
+local function RandomVector()
+	return vector.Rotate({ x = 1, y = 0 }, math.random(0, 359))
+end
+
+local function Explode(center)
+	return function(item)
+		local speed = 200 + 50 * math.random()
+		local vel = vector.Sub(eapi.GetPos(item.body), center)
+		if vector.Length(vel) == 0 then vel = RandomVector() end
+		eapi.SetVel(item.body, vector.Normalize(vel, speed))
+		util.AnimateRotation(item.tile, 0.25 * (1 + math.random()))
+	end
+end
+
+local function Start(map)
+	if not map then
+		util.Goto("startup")
+	else
+		Arrive(map)
+	end
+end
+
+local function Reset()
+	ball.safe = 0
+	ball.homes = 0
+	ball.place = nil
+	util.Map(actor.Delete, kule.elements)
+	Start(levels[state.current].map)
+end
+
+local function Fail(center)
+	util.Map(Explode(eapi.GetPos(center.body)), kule.elements)
+	eapi.AddTimer(staticBody, 2, Reset)
+end
+
+local function StopText(body)
+	local function ScrollAway()
+		input.Bind("Drop")
+		util.DelayedDestroy(body, 1)
+		eapi.SetAcc(body, { x = 0, y = -512 })
+		Reset()
+	end
+	input.Bind("Drop", false, util.KeyDown(ScrollAway))
+	eapi.SetVel(body, vector.null)
+	eapi.SetAcc(body, vector.null)
+	eapi.SetPos(body, vector.null)
+end
+
+local function RemoveGibberish(gibberish)
+	local function Remove() util.Map(actor.Delete, gibberish) end
+	eapi.AddTimer(staticBody, 1.0, Remove)
+	kule.elements = nil
+end
+
+local function DrawBox(body, offset, size, color, z)
+	local tile = eapi.NewTile(body, offset, size, util.white, z)
+	eapi.SetColor(tile, util.Gray(color))
+end
+
+local function TextBox(body)
+	DrawBox(body, { x = -154, y = -14 }, { x = 308, y = 28 }, 0.25, 80)
+	DrawBox(body, { x = -152, y = -12 }, { x = 304, y = 24 }, 0.20, 90)
+	DrawBox(body, { x = -154, y = -14 }, { x = 306, y = 26 }, 0.15, 85)
+end
+
+local function AdvanceLevel()
+	local text = util.ConvertString(levels[state.current].motd)
+	local body = eapi.NewBody(gameWorld, { x = 0, y = 256 })
+	util.PrintOrange(util.TextCenter(text), text, nil, body, 0.0)
+	util.Delay(body, 1, StopText, body)
+	eapi.SetVel(body, { x = 0, y = -512 })
+	eapi.SetAcc(body, { x = 0, y = 512 })
+	RemoveGibberish(kule.elements)
+	TextBox(body)
+end
+
+local function CrumbleAway()
+	local store = kule.elements
+	for i = 1, #store, 1 do
+		local item = store[i]
+		local delay = 0.5 * i / #store
+		util.Delay(item.body, delay, CrumbleItem, item)
+	end
+end
+
+local function Spin(item)
+	util.AnimateRotation(item.tile, 0.2 * (1 + math.random()))
+end
+
+local function DoTheSpin()
+	util.Map(Spin, kule.elements)
+end
+
+local function UpdateProgress()
+	state.current = state.current + 1
+	state.progress = math.max(state.progress, state.current)
+        local saveFile = io.open("/kule/saavgaam", "w")
+        if saveFile then
+		saveFile:write("state.progress = " .. state.progress .. "\n")
+		io.close(saveFile)
+		eapi.SyncFS()
+        end
+end
+
+local function Victory()
+	UpdateProgress()
+	util.DoEventsRelative({ { 0.0, sfx.Rainbow },
+				{ 1.0, DoTheSpin },
+				{ 1.0, CrumbleAway },
+				{ 1.0, AdvanceLevel } })
+end
+
+kule = {
+	TurnSide = TurnSide,
+	Victory = Victory,
+	GetPos = GetPos,
+	Push = Push,
+	Fail = Fail,
+}
+
+AdvanceLevel()
+levels = { }
+
+levels[#levels + 1] = {
+motd = "Just press SPACE for now.",
+map = {
+"######### #########",
+"######### #########",
+"######### #########",
+"######### #########",
+"######### #########",
+"######### #########",
+"###      >      ###",
+"### ########### ###",
+"### ########### ###",
+"### ########### ###",
+"### ########### ###",
+"###x###########x###",
+"###################",
+"###################",
+}}
+
+levels[#levels + 1] = {
+motd = "Now you will need " .. actor.arrows .. " too.",
+map = {
+"###### ##### ######",
+"###### ##### ######",
+"###### ##### ######",
+"###### ##### ######",
+"###### ##### ######",
+"###### ##### ######",
+"###   <     <   ###",
+"### ##### ##### ###",
+"### ##### ##### ###",
+"### ##### ##### ###",
+"### ##### ##### ###",
+"###x#####x#####x###",
+"###################",
+"###################",
+}}
+
+levels[#levels + 1] = {
+motd = "Kule means balls in Polish.",
+map = {
+"###### ##### ######",
+"###### ##### ######",
+"###### ##### ######",
+"####  <     <  ####",
+"#### #### #### ####",
+"#### #### #### ####",
+"#### #### #### ####",
+"#### #### #### ####",
+"##  <    >    >  ##",
+"## ### ##### ### ##",
+"## ### ##### ### ##",
+"## ### ##### ### ##",
+"##x###x#####x###x##",
+"###################",
+}}
+
+levels[#levels + 1] = {
+motd = "Have you seen The Resonance Cascade?",
+map = {
+"##### # # # # #####",
+"##### # # # # #####",
+"#### >  # # # #####",
+"#### ## # # # #####",
+"####x# <  # # #####",
+"###### ## # # #####",
+"######x# >  # #####",
+"######## ## # #####",
+"########x# <  #####",
+"########## ## #####",
+"##########x# > ####",
+"############ # ####",
+"############x#x####",
+"###################",
+}}
+
+levels[#levels + 1] = {
+motd = "https://github.com/snauts/kule",
+map = {
+"# # # ## # ## # # #",
+"# # # ## # ## # # #",
+"# # # # < < # # # #",
+"# # # # # # # # # #",
+"# # # # # # # # # #",
+"# # # # # # # # # #",
+"# # # # # # # # # #",
+"# # # # # # # # # #",
+"# # # # # # # # # #",
+"# # #   # #   # # #",
+"# # # ### ### # # #",
+"#  < < # > # > <  #",
+"##x#x#x#x#x#x#x#x##",
+"###################",
+}}
+
+levels[#levels + 1] = {
+motd = "Kule means tower in Turkish.",
+map = {
+"#### #### #### ####",
+"#### #### #### ####",
+"##  >    <    <  ##",
+"## ### ##### ### ##",
+"## ### ##### ### ##",
+"##    <     <    ##",
+"#### #### #### ####",
+"##  >    <    >  ##",
+"## ### ##### ### ##",
+"## ### ##### ### ##",
+"##    >     <    ##",
+"#### #### #### ####",
+"####x####x####x####",
+"###################",
+}}
+
+levels[#levels + 1] = {
+motd = "Watch out for barnacles.",
+map = {
+"## # # # # # # # ##",
+"##  < < < < > >  ##",
+"### # # # # # # ###",
+"###  < < > < >  ###",
+"#### # # # # # ####",
+"####  < > > >  ####",
+"##### # # # # #####",
+"#####  < < >  #####",
+"###### # # # ######",
+"#####  # # #  #####",
+"####  ## # ##  ####",
+"###  ### # ###  ###",
+"###x####x#x####x###",
+"###################",
+}}
+
+levels[#levels + 1] = {
+motd = "\"X\" marks the spot.",
+map = {
+"#### ######### ####",
+"### < ####### > ###",
+"### # ####### # ###",
+"###  > ##### <  ###",
+"#### # ##### # ####",
+"####  > ### <  ####",
+"##### # ### # #####",
+"#### < >   < < ####",
+"#### # ##### # ####",
+"### <  #####  > ###",
+"### # ####### # ###",
+"## < > ##### < > ##",
+"##x#x#x#####x#x#x##",
+"###################",
+}}
+
+levels[#levels + 1] = {
+motd = "Kule means sack in Latvian.",
+map = {
+"### # # # # #######",
+"###  > < <  #######",
+"#### # # # ########",
+"####  < > < #######",
+"##### # # # #######",
+"#####  > < > ######",
+"###### # # # ######",
+"######  > > > #####",
+"####### # # # #####",
+"#######  > > > ####",
+"######## # # # ####",
+"########  > > > ###",
+"#########x#x#x#x###",
+"###################",
+}}
+
+levels[#levels + 1] = {
+motd = "All roads lead to Rome.",
+map = {
+"# ### ####### ### #",
+"#  ##  #####  ##  #",
+"##  ##  ###  ##  ##",
+"###  ## ### ##  ###",
+"####   < # >   ####",
+"###### # # # ######",
+"#####  # # #  #####",
+"####  ## # ##  ####",
+"###  ##  #  ##  ###",
+"##  ### ### ###  ##",
+"## #### ### #### ##",
+"# >    >   <    > #",
+"#x#x#####x#####x#x#",
+"###################",
+}}
+
+levels[#levels + 1] = {
+motd = "You are the BEST!",
+map = {
+"# ### ####### ### #",
+"#   #   ###   #   #",
+"### ### ### ### ###",
+"#  >    ###   #   #",
+"# ### ####### ### #",
+"#   #   ###  <    #",
+"### ### ### ### ###",
+"#   #   ###    >  #",
+"# ### ####### ### #",
+"#    <  ###   #   #",
+"### ### ### ### ###",
+"#  >   >   <   <  #",
+"#x###x###x###x###x#",
+"###################",
+}}
+
+levels[#levels + 1] = {
+motd = "You can emulate original Kule.",
+map = {
+"######## # ########",
+"####### < > #######",
+"####### # # #######",
+"###### < > > ######",
+"###### # # # ######",
+"##### < < > > #####",
+"##### # # # # #####",
+"#### < < < > > ####",
+"#### # # # # # ####",
+"### < < > < > > ###",
+"### # # # # # # ###",
+"## < < < > > > > ##",
+"##x#x#x#x#x#x#x#x##",
+"###################",
+}}
+
+levels[#levels + 1] = {
+motd = "The devil has two hands.",
+map = {
+"# # # # # # # # # #",
+"# # # # # # # # # #",
+"#  > < > > < < <  #",
+"## # # #x#x# # # ##",
+"# > > < ### > > > #",
+"# # # #x###x# # # #",
+"#  < > ##### > <  #",
+"## # #x#####x# # ##",
+"# > > ####### > > #",
+"# # #x#######x# # #",
+"#  > ######### >  #",
+"## # ######### # ##",
+"##x#x#########x#x##",
+"###################",
+}}
+
+levels[#levels + 1] = {
+motd = "I am not big fan of puzzle games.",
+map = {
+"### ### ### ### ###",
+"### ### ### ### ###",
+"#  >   >   >   >  #",
+"# ### ### ### ### #",
+"#    <   <   <    #",
+"### ### ### ### ###",
+"###    <   >    ###",
+"##### ### ### #####",
+"###  <   <   <  ###",
+"### ### ### ### ###",
+"#  >   >   >   >  #",
+"# ### ### ### ### #",
+"#x###x###x###x###x#",
+"###################",
+}}
+
+levels[#levels + 1] = {
+motd = "Two balls are better than one.",
+map = {
+"## ## # ### # ## ##",
+"## ##  < # >  ## ##",
+"# > ## #x#x# ## < #",
+"#x# ## ##### ## #x#",
+"### ## ##### ## ###",
+"#  <  <  #  >  <  #",
+"#x## ### # ### ##x#",
+"#### ### # ### ####",
+"#   > # < > # <   #",
+"#x### #x#x#x# ###x#",
+"##### ####### #####",
+"###  <  ###  <  ###",
+"###x###x###x###x###",
+"###################",
+}}
+
+levels[#levels + 1] = {
+motd = "Is Kule NP-complete?",
+map = {
+"# # # ####### #####",
+"# # #        <    #",
+"# # ####### ##### #",
+"# #        >    # #",
+"# ####### ##### # #",
+"#        >    # # #",
+"### ### ##### # # #",
+"#  >   >      # # #",
+"# ### ### ##### # #",
+"# #  >   >      # #",
+"# # ### ### ##### #",
+"# # #  >   <      #",
+"#x#x#x##x#x##x###x#",
+"###################",
+}}
+
+levels[#levels + 1] = {
+motd = "\"VÄ«\" stands for ViktorÄ«!",
+map = {
+"## # ######### # ##",
+"## # ######### # ##",
+"# < < ####### < < #",
+"#x# # ####### # #x#",
+"### # ####### # ###",
+"## > > ##### < < ##",
+"##x# # ##### # #x##",
+"#### # ##### # ####",
+"### > > ### < < ###",
+"###x# # ### # #x###",
+"##### # ### # #####",
+"#### < > < < > ####",
+"####x#x#x#x#x#x####",
+"###################",
+}}
+
+levels[#levels + 1] = {
+motd = "Please help me add more levels!",
+map = {
+"### # ### ### # ###",
+"### #   # #   # ###",
+"### ### # # ### ###",
+"###   # # # #   ###",
+"##### # # # # #####",
+"#### < < < > > ####",
+"#### # # # # # ####",
+"####  > < > <  ####",
+"##### # # # # #####",
+"##   > > < < <   ##",
+"#  ### # # # ###  #",
+"# ##   # # #   ## #",
+"#x##x###x#x###x##x#",
+"###################",
+}}
+
+levels[#levels + 1] = {
+motd = "Release is always depressing.",
+map = {
+"### ##### ##### ###",
+"#  >  #  <  #  <  #",
+"# ### # ### # ### #",
+"# ### # ### # ### #",
+"#    > <   > <    #",
+"### ##### ##### ###",
+"#  <  #  >  #  >  #",
+"# ### # ### # ### #",
+"# ### # ### # ### #",
+"#    < >   < >    #",
+"### ##### ##### ###",
+"#  <     <     <  #",
+"#x####x#####x####x#",
+"###################",
+}}
+
+levels[#levels + 1] = {
+motd = "Ronia the Robber's Daughter.",
+map = {
+"# # # ####### # # #",
+"#  <  #######  >  #",
+"## # ######### # ##",
+"# > > ####### > > #",
+"# # # ####### # # #",
+"#  >  #######  >  #",
+"## # ######### # ##",
+"# > < ####### > > #",
+"# # # ####### # # #",
+"#  < > ##### < >  #",
+"## # # ##### # # ##",
+"# < < <     < < < #",
+"#x#x#x###x###x#x#x#",
+"###################",
+}}
+
+levels[#levels + 1] = {
+motd = "Check out script/levels.lua",
+map = {
+"#### #### #### ####",
+"#### #### #### ####",
+"##  >  ## ##  <  ##",
+"## ### ## ## ### ##",
+"## ## > # # < ## ##",
+"## ##x# # # #x## ##",
+"# > ### # # ### < #",
+"#x#x#  < > >  #x#x#",
+"##### ####### #####",
+"###  >  ###  >  ###",
+"### ### ### ### ###",
+"## > # > # > # > ##",
+"##x#x#x#x#x#x#x#x##",
+"###################",
+}}
+
+levels[#levels + 1] = {
+motd = "Take your balls for a walk!",
+map = {
+"# # # # # # # # # #",
+"#  > > > < < < <  #",
+"## # # # # # # # ##",
+"# > > < > < > > > #",
+"# # # # # # # # # #",
+"#  < > < > < < <  #",
+"## # # # # # # # ##",
+"# < < < > < > > > #",
+"# # # # # # # # # #",
+"#  < > > < > > >  #",
+"## # # # # # # # ##",
+"# > < < > > > < < #",
+"#x#x#x#x#x#x#x#x#x#",
+"###################",
+}}
+
+levels[#levels + 1] = {
+motd = "The End",
+}
+local speed = 0.1
+
+local rainbow = {
+	{ r = 1.00, g = 0.00, b = 0.00, a = 1.0 },
+	{ r = 1.00, g = 0.50, b = 0.00, a = 1.0 },
+	{ r = 1.00, g = 1.00, b = 0.00, a = 1.0 },
+	{ r = 0.00, g = 1.00, b = 0.00, a = 1.0 },
+	{ r = 0.00, g = 1.00, b = 1.00, a = 1.0 },
+	{ r = 0.00, g = 0.00, b = 1.00, a = 1.0 },
+	{ r = 0.40, g = 0.10, b = 0.20, a = 1.0 },
+}
+
+local function Distance(item)
+	return 1.0 - vector.Length(actor.GetPos(item)) / 192.0
+end
+
+local function GetColor(index)
+	return rainbow[(math.floor(index)) % #rainbow + 1]
+end
+
+local function MoveColor(item, adjust)
+	local index = Distance(item) * #rainbow + adjust
+	local final = util.Mix(GetColor(index), GetColor(index + 1), index % 1)
+	eapi.AnimateColor(item.tile, eapi.ANIM_CLAMP, final, speed, 0)
+end
+
+local function Rainbow()
+	local adjust = 0
+	local store = kule.elements
+	local function Cycle()
+		for i = 1, #store, 1 do
+			MoveColor(store[i], adjust)
+		end
+		eapi.AddTimer(store[1].body, speed, Cycle)
+		adjust = adjust + 1
+	end
+	Cycle()	
+end
+
+local sparkSize = { x = 16, y = 4 }
+local sparkPos = { x = -8, y = -2 }
+local sparkColor = { r = 1.0, g = 0.8, b = 0, a = 0.5 }
+local sparkFade = { r = 1.0, g = 0.8, b = 0, a = 0.0 }
+local sparkLife = 0.5
+
+local function FadeSpark(tile, color)
+	eapi.AnimateColor(tile, eapi.ANIM_CLAMP, color, sparkLife, 0)
+end
+
+local function Spark(pos, dir, spread, sparkColor, fadeColor)
+	local speed = math.random(100, 200)
+	local body = eapi.NewBody(gameWorld, pos)
+	local angle = math.random(-0.5 * spread, 0.5 * spread)
+	local tile = eapi.NewTile(body, sparkPos, sparkSize, util.rhombus, 10)
+	eapi.SetVel(body, vector.Normalize(vector.Rotate(dir, angle), speed))
+	util.DelayedDestroy(body, sparkLife)
+	eapi.SetColor(tile, sparkColor)
+	util.RotateTile(tile, angle)
+	FadeSpark(tile, fadeColor)
+end
+
+local function CopyColor(color, alpha)
+	return util.SetColorAlpha(util.Map(util.Identity, color), alpha)
+end
+
+local function SwitchFlop(pos, dir, spread, color)
+	local sparkFade = CopyColor(color, 0.0)
+	local sparkColor = CopyColor(color, 0.5)
+
+	for i = 1, 10, 1 do
+		Spark(pos, dir, spread, sparkColor, sparkFade)
+	end
+end
+
+local rayLife = 0.25
+local raySize = { x = 2, y = 2 }
+local rayOffset = { x = 0, y = -1 }
+local rayDstSize = { x = 256, y = 64 }
+local rayDstOffset = { x = 0, y = -32 }
+
+local function FadeRay(tile)
+	eapi.AnimateColor(tile, eapi.ANIM_CLAMP, util.invisible, rayLife, 0)
+end
+
+local function Ray(body, angle)
+	local tile = eapi.NewTile(body, rayOffset, raySize, util.triangle, 10)
+	eapi.AnimatePos(tile, eapi.ANIM_CLAMP, rayDstOffset, rayLife, 0)
+	eapi.AnimateSize(tile, eapi.ANIM_CLAMP, rayDstSize, rayLife, 0)
+	eapi.SetColor(tile, util.Gray(1.0))
+	util.AnimateRotation(tile, 2, angle)
+	FadeRay(tile)
+end
+
+local function HomeRays(pos)
+	local body = eapi.NewBody(gameWorld, pos)
+	util.DelayedDestroy(body, rayLife)
+	for angle = 0, 359, 30 do
+		Ray(body, angle)
+	end
+end
+
+sfx = {
+	Rainbow = Rainbow,
+	HomeRays = HomeRays,
+	SwitchFlop = SwitchFlop,
+}
+local function Info()
+	local border = 4
+	local text = {
+		"KULE was a Polish game for ZX Spectrum.", 
+		"It had a profound influence on me when",
+		"I was a kid. This game formed my belief",
+		"that world is totally deterministic.",
+	}
+	for i = 1, #text, 1 do
+		local pos = { x = -160 + border, y = 120 - i * 16 - border }
+		util.PrintOrange(pos, text[i], nil, nil, 0.2)
+	end
+end
+
+local function Half(x)
+	return 0.5 * x
+end
+
+local function Dim(tile)
+	eapi.SetColor(tile, util.Map(Half, eapi.GetColor(tile)))
+end
+
+local function Blink(tile)
+	local color = util.Map(Half, eapi.GetColor(tile))
+	eapi.AnimateColor(tile, eapi.ANIM_REVERSE_LOOP, color, 0.1, 0)
+end
+
+local function Help()
+	local text = "Press SPACE to start game!"
+	local pos = util.TextCenter(text)
+	util.Map(Blink, util.PrintOrange(pos, text, nil, nil, 0.2))
+
+	local text = "Use ESC to exit game."
+	local pos = vector.Offset(util.TextCenter(text), 0, -16)
+	util.Map(Dim, util.PrintOrange(pos, text, nil, nil, 0.2))
+end
+
+local function AppendHelp(text)
+	if state.progress > 1 then
+		return text .. " (use " .. actor.arrows .. " to select)"
+	else
+		return text
+	end
+end
+
+local tiles = { }
+local function Level(num)
+	if num >= 1 and num <= state.progress then
+		local pos = { x = -156, y = -120 }
+		local text = "Level:" .. num
+		text = AppendHelp(text)
+		util.Map(eapi.Destroy, tiles)
+		tiles = util.PrintOrange(pos, text, nil, nil, 0.2)
+		state.current = num
+	end
+end
+
+local function Select(dir)
+	return function() Level(state.current + dir) end
+end
+
+input.Bind("Left", false, util.KeyDown(Select(-1)))
+input.Bind("Right", false, util.KeyDown(Select(1)))
+
+input.Bind("Drop", false, util.KeyDown(function() util.Goto("kule") end))
+
+Level(state.current)
+Help()
+Info()
+local function RandomElement(table)
+	return table[util.Random(1, #table)]
+end
+
+local function Length(table)
+	local count = 0
+	for _, _ in pairs(table) do
+		count = count + 1
+	end
+	return count
+end
+
+local function LoadFont(fontFile, gradientFile, spriteSize)
+	fontFile = { fontFile, filter = true }
+	spriteSize = spriteSize or { x = 8, y = 16 }
+	local fontset = {
+		sprites = eapi.ChopImage(fontFile, spriteSize),
+		gradient = eapi.ChopImage(gradientFile, spriteSize),
+		size = spriteSize
+	}
+	return fontset
+end
+
+local function Gray(level)
+        return { r = level, b = level, g = level }
+end
+
+local function Print(pos, text, color, z, body, fontset, image)
+	body = body or staticBody
+	color = color or Gray(1.0)
+	fontset = fontset or util.defaultFontset
+	local sprites = fontset[image or "sprites"]
+	local p = { x = pos.x, y = pos.y }
+
+	local function PutChar(p)
+		local tile = eapi.NewTile(body, p, fontset.size, sprites, z)
+                eapi.SetColor(tile, color)
+		return tile
+	end
+
+	local textTiles = {}
+	for c = 1, #text do
+		local tile = PutChar(p)
+		local char = string.sub(text, c, c)
+		local index = string.byte(char, 1) - 32
+		local row = math.floor(index / 16)
+		index = index * 2 + row * 32
+		eapi.SetFrame(tile, index);
+		p.x = p.x + fontset.size.x
+		table.insert(textTiles, tile)
+ 	end
+	return textTiles
+end
+
+local function PrintShadow(pos, str, color, z, body, shadow, fontset)
+	z = z or 100
+	shadow = shadow or 0.2
+	color = color or util.Gray(1.0)
+	fontset = fontset or util.defaultFontset
+	local shadowColor = util.Gray(shadow)
+	local shadowOffset = fontset.size.x / 8
+	local tiles1 = Print(pos, str, color, z, body, fontset)
+	pos = vector.Offset(pos, shadowOffset, -shadowOffset)
+	local tiles2 = Print(pos, str, shadowColor, z - 0.01, body, fontset)
+	return util.JoinTables(tiles1, tiles2)
+end
+
+local function PrintGradient(pos, str, c1, c2, z, body, shadow, fontset)
+	z = z or 100
+	fontset = fontset or util.defaultFontset
+	local tiles1 = PrintShadow(pos, str, c1, z, body, shadow, fontset)
+	local tiles2 = Print(pos, str, c2, z + 0.01, body, fontset, "gradient")
+	return util.JoinTables(tiles1, tiles2)
+end
+
+local yellow = { r = 1.0, g = 1.0, b = 0.0 }
+local orange = { r = 1.0, g = 0.3, b = 0.0 }
+local function PrintOrange(pos, str, z, body, shadow, fontset)
+	return PrintGradient(pos, str, yellow, orange, z, body, shadow, fontset)
+end
+
+local red = { r = 0.6, g = 0.0, b = 0.0 }
+local function PrintRed(pos, str, z, body, shadow, fontset)
+	return PrintGradient(pos, str, orange, red, z, body, shadow, fontset)
+end
+
+local cameraSize = nil
+local function GetCameraSize()
+	return cameraSize
+end
+
+local function WorldBounds(size)
+	cameraSize = size
+	size = vector.Scale(size, 4)
+	return { l = -size.x, b = -size.y, r = size.x, t = size.y }
+end
+
+local function KeyDown(Fn)
+	return function(keyDown)
+		if not keyDown then return end
+		Fn()
+	end
+end
+
+local function Closure(Fn, arg1, arg2, arg3)
+	return function() Fn(arg1, arg2, arg3) end
+end
+
+local function DestroyClosure(obj)
+	return function() eapi.Destroy(obj) end
+end
+
+local function DelayedDestroy(body, time)
+	eapi.AddTimer(body, time, DestroyClosure(body))
+end
+
+local function DestroyTable(table)
+	if type(table) == "table" then util.Map(eapi.Destroy, table) end
+end
+
+local function PreloadSound(file)
+        if type(file) == "table" then
+		util.Map(PreloadSound, file)
+        else
+                handle = eapi.PlaySound(false, file, 0, 0)
+                eapi.FadeSound(handle, 0)
+        end
+end
+
+local function PreloadMusic(file)
+	eapi.PlayMusic(file, nil, 0, 0)
+	eapi.FadeMusic(0)
+end
+
+local function Preload()
+	-- PreloadMusic("sound/music.ogg")
+
+	-- PreloadSound({ "sound/sound.ogg", })
+end
+
+local sceneSize = { l = -4000, r = 4000, b = -2400, t = 2400 }
+
+local function LoadDefaultFont()
+	return LoadFont("image/default-font.png", "image/gradient-font.png")
+end
+
+local sounds = { }
+local function PlaySound(world, file, interval, repeats, volume, fadeIn)
+	local currTime = eapi.GetTime(world)
+	local prevTime = sounds[file]
+	if not prevTime or currTime - prevTime > interval then
+		sounds[file] = currTime
+		return eapi.PlaySound(gameWorld, file, repeats, volume, fadeIn)	
+	end
+end
+
+local fontMap = { }
+fontMap[0xc4] = { }
+fontMap[0xc5] = { }
+
+fontMap[0xc4][0x80] = string.char(128)
+fontMap[0xc4][0x8c] = string.char(129)
+fontMap[0xc4][0x92] = string.char(130)
+fontMap[0xc4][0xa2] = string.char(131)
+fontMap[0xc4][0xaa] = string.char(132)
+fontMap[0xc4][0xb6] = string.char(133)
+fontMap[0xc4][0xbb] = string.char(134)
+
+fontMap[0xc5][0x85] = string.char(135)
+fontMap[0xc5][0xa0] = string.char(136)
+fontMap[0xc5][0xaa] = string.char(137)
+fontMap[0xc5][0xbd] = string.char(138)
+
+fontMap[0xc4][0x81] = string.char(144)
+fontMap[0xc4][0x8d] = string.char(145)
+fontMap[0xc4][0x93] = string.char(146)
+fontMap[0xc4][0xa3] = string.char(147)
+fontMap[0xc4][0xab] = string.char(148)
+fontMap[0xc4][0xb7] = string.char(149)
+fontMap[0xc4][0xbc] = string.char(150)
+
+fontMap[0xc5][0x86] = string.char(151)
+fontMap[0xc5][0xa1] = string.char(152)
+fontMap[0xc5][0xab] = string.char(153)
+fontMap[0xc5][0xbe] = string.char(154)
+
+fontMap[0xe2] = { }
+fontMap[0xe2][0x86] = { }
+fontMap[0xe2][0x86][0x92] = string.char(156)
+fontMap[0xe2][0x86][0x90] = string.char(157)
+fontMap[0xe2][0x86][0x93] = string.char(158)
+fontMap[0xe2][0x86][0x91] = string.char(159)
+
+local function ConvertString(text)
+	local index = 1
+	local newText = ""
+	local function GetChar(table)
+		local char = string.sub(text, index, index)
+		local byte = string.byte(char, 1)
+		local entry = table[byte]
+		index = index + 1
+		if not entry then
+			return char
+		elseif type(entry) == "table" then
+			return GetChar(entry)
+		elseif type(entry) == "string" then
+			return entry
+		else
+			return string.char(143) -- star
+		end
+	end
+	while index <= #text do
+		newText = newText .. GetChar(fontMap)
+	end
+	return newText
+end
+
+local function Convert(table)
+	for i, value in pairs(table) do
+		if type(value) == "table" then
+			Convert(value)
+		elseif type(value) == "string" then
+			table[i] = ConvertString(value)
+		else
+			assert(true, "String Table Error")
+		end
+	end 	
+end
+
+local function Goto(scene)
+	sounds = { }
+	eapi.Clear()
+	input.UnbindAll()
+	state.level = scene
+
+	-- step = 5 milliseconds, quad tree depth = 16
+	gameWorld = eapi.NewWorld("Game", 5, sceneSize, 40)
+
+	util.defaultFontset = LoadDefaultFont()
+
+	camera = eapi.NewCamera(gameWorld, vector.null, nil, nil)
+	eapi.SetBoundary(camera, WorldBounds(eapi.GetSize(camera)))
+	eapi.SetColor(camera, util.Gray(0.0))
+
+	staticBody = eapi.GetBody(gameWorld)
+	eapi.RandomSeed(42)
+
+	dofile("script/actor.lua")
+	dofile("script/" .. scene .. ".lua")
+end
+
+local function RandomError(a, b)
+	a = a or "nil"
+	b = b or "nil"
+	print("Error in util.random(" .. a .. ", " .. b .. ")")
+	assert(true, "RandomError")
+end
+
+local function Random(a, b)
+	local rnd = eapi.Random() / 2147483648
+	if a then
+		if not(b) then
+			b = a
+			a = 1
+		end
+		if (a > b) then 
+			RandomError(a, b)
+		end
+		return math.floor(rnd * (b - a + 1)) + a
+	elseif b then
+		RandomError(a, b)
+	else
+		return rnd
+	end
+end
+
+local function JoinTables(a, b)
+	local result = { }
+	for _, v in pairs(a) do
+		table.insert(result, v)
+	end
+	for _, v in pairs(b) do
+		table.insert(result, v)
+	end
+	return result
+end
+
+local function InjectTable(dst, src)
+	for i, v in pairs(src) do
+		dst[i] = v
+	end
+	return dst
+end
+
+local function Sign(val)
+	if  val > 0 then 
+		return 1
+	elseif val < 0 then
+		return -1
+	else
+		return 0
+	end
+end
+
+local function MaybeCall(fn, ...)
+	return ((type(fn) == "function") and fn(...)) or fn
+end
+
+local function Map(Fn, a, b)
+	if a == nil then return nil end
+	local new = { }
+	for i, _ in pairs(a) do
+		new[i] = (b and Fn(a[i], b[i])) or Fn(a[i])
+	end
+	return new
+end
+
+local function Member(item, table)
+	for _, v in pairs(table) do
+		if item == v then return v end
+	end 
+	return false
+end
+
+local function FileExists(n)
+        local f = io.open(n)
+        if f == nil then
+                return false
+        else
+                io.close(f)
+                return true
+        end
+end
+
+local function DoEventsRelative(events, body)
+        local i = 1
+	local control = { }
+        body = body or staticBody
+        local function Do()
+		if control.stop then return end
+                events[i][2](Do)
+                i = i + 1
+                if events[i] and events[i][1] then
+                        eapi.AddTimer(body, events[i][1], Do)
+                end
+        end
+        eapi.AddTimer(body, events[1][1], Do)
+	return control
+end
+
+local function DoEventsAbsolute(events, body)
+	for i = #events, 2, -1 do
+		events[i][1] = events[i][1] - events[i - 1][1]
+	end
+	return DoEventsRelative(events, body)
+end
+
+local function SetColorAlpha(color, alpha)
+	color.a = alpha
+	return color
+end
+
+local function SetTileAlpha(tile, alpha)
+        local color = eapi.GetColor(tile)
+        color.a = alpha
+        eapi.SetColor(tile, color)
+end
+
+local function ChangeTileAlpha(tile, alpha)
+        local color = eapi.GetColor(tile)
+	if color.a > 0 then 
+		color.a = alpha
+		eapi.SetColor(tile, color)
+	end
+end
+
+local function HideTile(tile)
+	SetTileAlpha(tile, 0)
+end
+
+local function ShowTile(tile, alpha)
+	SetTileAlpha(tile, alpha or 1)
+end
+
+local function RotateTile(tile, angle)
+        eapi.SetAngle(tile, vector.Radians(angle))
+end
+
+local function RandomRotateTile(tile)
+	RotateTile(tile, 360 * Random())
+end
+
+local function PadZeros(number, amount)
+	local padded = ""
+	amount = amount - 1
+	local base = math.pow(10, amount)
+	for i = 1, amount, 1 do
+		if number / base >= 1.0 then break end
+		padded = padded .. "0"
+		base = base / 10
+	end
+	return padded .. number
+end
+
+local function Div(a, b)
+	return math.floor(a / b)
+end
+
+local function TextCenter(text, fontset)
+	fontset = fontset or util.defaultFontset
+	return { x = -fontset.size.x * string.len(text) / 2,
+		 y = -fontset.size.y / 2 }
+end
+
+local function Repeater(FN, times, interval, body, delay)
+	body = body or staticBody
+	local function Repeat()
+		FN()
+		times = times - 1
+		if times > 0 then
+			eapi.AddTimer(body, interval, Repeat)
+		end
+	end
+	eapi.AddTimer(body, delay or 0, Repeat)
+end
+
+local function StopMusic(time)
+	eapi.FadeMusic(time or 0.5)
+end
+
+local function FixAngle(angle)
+	return (angle + 180) % 360 - 180
+end
+
+local function FormatBool(value)
+	return value and "true" or "false"
+end
+
+local function FormatPrimitive(value)
+        if type(value) == "nil" then
+                return "nil"
+        end
+        if type(value) == "string" then
+                return "\"" .. value .. "\""
+        end
+        if type(value) == "number" then
+                return "" .. value
+        end
+        if type(value) == "boolean" then
+		return FormatBool(value)
+        end
+        error("unknown type")
+end
+
+local function Format(value)
+        if type(value) == "table" then
+                local str = "{"
+                for name, value in pairs(value) do
+                        if type(name) == "string" then
+                                str = str .. name .. "="
+                        end
+                        str = str .. Format(value) .. ","
+                end
+                return str .. "}"
+        else
+                return FormatPrimitive(value)
+        end
+end
+
+local function AnimateRotation(tile, speed, angle)
+	angle = angle or 0
+	util.RotateTile(tile, angle)
+	angle = vector.Radians(angle + 360)
+	eapi.AnimateAngle(tile, eapi.ANIM_LOOP, vector.null, angle, speed, 0)
+end
+
+local function Delay(body, time, Fn, obj1, obj2)
+	eapi.AddTimer(body, time, function() Fn(obj1, obj2) end)
+end
+
+local function StopAcc(obj, acc)
+	eapi.SetAcc(obj.body, acc or vector.null)
+end
+
+local function Mix(c1, c2, q)
+	local function Lerp(v1, v2) return v1 + (v2 - v1) * q end
+	return util.Map(Lerp, c1, c2)
+end
+
+local function Identity(x)
+	return x
+end
+
+util = {
+	yellow = yellow,
+	orange = orange,
+	FixAngle = FixAngle,
+	Noop = function() end,
+	sceneSize = sceneSize,
+	golden = 0.61803399,
+	fibonacci = 222.4922364,
+	SetColorAlpha = SetColorAlpha,
+	invisible = { r = 1, g = 1, b = 1, a = 0 },
+	DoEventsRelative = DoEventsRelative,
+	DoEventsAbsolute = DoEventsAbsolute,
+	RandomRotateTile = RandomRotateTile,
+	ChangeTileAlpha = ChangeTileAlpha,
+	AnimateRotation = AnimateRotation,
+	DelayedDestroy = DelayedDestroy,
+	DestroyClosure = DestroyClosure,
+	RandomElement = RandomElement,
+	GetCameraSize = GetCameraSize,
+	PrintGradient = PrintGradient,
+	ConvertString = ConvertString,
+	DestroyTable = DestroyTable,
+	SetTileAlpha = SetTileAlpha,
+	PrintShadow = PrintShadow,
+	PrintOrange = PrintOrange,
+	InjectTable = InjectTable,
+	FormatBool = FormatBool,
+	TextCenter = TextCenter,
+	FileExists = FileExists,
+	JoinTables = JoinTables,
+	PlaySound = PlaySound,
+	StopMusic = StopMusic,
+	MaybeCall = MaybeCall,
+	RotateTile = RotateTile,
+	PrintRed = PrintRed,
+	Repeater = Repeater,
+	PadZeros = PadZeros,
+	HideTile = HideTile,
+	ShowTile = ShowTile,
+	Identity = Identity,
+	StopAcc = StopAcc,
+	Closure = Closure,
+	KeyDown = KeyDown,
+	Preload = Preload,
+	Format = Format,
+	Member = Member,
+	Random = Random,
+	Length = Length,
+	Delay = Delay,
+	Print = Print,
+	Goto = Goto,
+	Sign = Sign,
+	Gray = Gray,
+	Div = Div,
+	Map = Map,
+	Mix = Mix,
+}
+return util
+local function Add(a, b)
+	return { x = a.x + b.x, y = a.y + b.y }
+end
+
+local function Sub(a, b)
+	return { x = a.x - b.x, y = a.y - b.y }
+end
+
+local function Scale(v, f)
+	return { x = v.x * f, y = v.y * f }
+end
+
+local function Reverse(v)
+	return { x = -v.x, y = -v.y }
+end
+
+local function Length(v)
+	return math.sqrt(v.x * v.x + v.y * v.y)
+end
+
+local function Distance(a, b)
+	return Length(Sub(a, b))
+end
+
+local function Normalize(v, amount)
+	amount = amount or 1.0
+	local len = Length(v)
+	if len == 0 then
+		return v
+	else
+		return Scale(v, amount / len)
+	end
+end
+
+local function Round(v, idp)
+	local mult = 10^(idp or 0)
+	return {x=math.floor(v.x * mult + 0.5) / mult,
+		y=math.floor(v.y * mult + 0.5) / mult}
+end
+
+local function IsZero(v)
+	return (v.x == 0 and v.y == 0)
+end
+
+local function Check(v)
+	return type(v) == "table" and v.x and v.y
+end
+
+local function Offset(v, x, y)
+	return { x = v.x + x, y = v.y + y }
+end
+
+local function Radians(theta)
+	return theta * (math.pi / 180)
+end
+
+local function Degrees(theta)
+	return 180 * theta / math.pi
+end
+
+local function Rotate(v, theta)
+	theta = Radians(theta)
+	local cs = math.cos(theta)
+	local sn = math.sin(theta)
+	return { x = v.x * cs - v.y * sn,
+		 y = v.x * sn + v.y * cs }
+end
+
+local function Floor(p)
+	return { x = math.floor(p.x), y = math.floor(p.y) }
+end
+
+local function Print(p)
+	print("v: " .. p.x .. " " .. p.y)
+end
+
+local function Rnd(vel, amount)
+	local function Rnd() return amount * (util.Random() - 0.5) end
+	return vector.Offset(vel, Rnd(), Rnd())
+end			     
+
+local function Angle(v)
+	return 180 * math.atan2(v.y, v.x) / math.pi
+end
+
+local null = { x = 0, y = 0 }
+
+vector = {
+	Angle = Angle,
+	Print = Print,
+	Rnd = Rnd,
+	Add = Add,
+	Sub = Sub,
+	Floor = Floor,
+	Scale = Scale,
+	Reverse = Reverse,
+	Round = Round,
+	Length = Length,
+	Distance = Distance,
+	Normalize = Normalize,
+	Radians = Radians,
+	Degrees = Degrees,
+	Check = Check,
+	Offset = Offset,
+	Rotate = Rotate,
+	null = null,
+}
+return vector
+OggS         @b“l    Y'U(vorbis    À]      ÀW     ©OggS          @b“l   MÚÿr;ÿÿÿÿÿÿÿÿÿÿÿÿ¢vorbis+   Xiph.Org libVorbis I 20120203 (Omnipresent)    vorbis$BCV @  B*­c:È!Œ¢ BÊ)ÇBĞ!£$Cˆ:Æ5ÇcG¹dŠBÉĞU  @  ¤WPrI-çœs£WÌqè çœså gÌq	%çœs9ç’r1çœs£Wr)-çœsGŠq§çœs¤GŠq¨çœsm1·’rÎ9çœsæ ‡Rr®5çœs¤gr%çœsÆ gÌqë çœsŒ5·ÔrÎ9çœsÎ9çœsÎ9çœsŒ1çœsÎ9çœsn1çs®9çœsÎ9çsÎ9çœs 4d    ¡(Šâ(²
+ È  @qG‘K±ËÑ$Y      H†¤HŠ¥Xfi&z¢(š¢*«²iÊ²,Ë²ëº.²
+ H  PQÅpY d  `(Š£8äX’¥Y„†¬ €    PG±Mñ$Ïò<Ïó<Ïó<Ïó<Ïó<Ïó<Ïó<Y     ‚(dBCV @  !CR\
+BCBÎC©¥ƒà)…%cÒS¬A!|ï=÷Ş{ïĞU    a8ˆÇ$!„b'Dq¦ !„å$XÊyè$İƒB¸œ{Ë¹÷Ş{ 4d   À „B!„B)¤”RH)¦˜bŠ)ÇsÌ1Ç ƒ2è “N:É¤’N:Ê$£Rk)µSL±åc­µÖœs¯A)cŒ1ÆcŒ1ÆcŒ1Æ#Y €  dA!„RH)¦˜rÌ1ÇBCV €     ER$Gr$G’$É’,I“<Ë³<Ë³<MÔDMUÕUm×öm_ömßÕeßöeÛÕe]–eİµm]Ö]]×u]×u]×u]×u]×u]×ĞU € €ä8ä8äH¤H
+²
+   €£8ŠãHäX%Y’&i–gy–§yš¨‰²
+        €¢(Š£8$Y–¦i§z¢(šªªŠ¦©ªªjš¦iš¦iš¦iš¦iš¦iš¦iš¦iš¦iš¦iš¦iš¦i¡!«  	  ÇqGqÇq$G’$ 4d      CQEr,Ç’4K³<ËÓDÏô\Q6uSWm 4d          Çs<Çs<É“<Ës<Ç“<IÓ4MÓ4MÓ4MÓ4MÓ4MÓ4MÓ4MÓ4MÓ4MÓ4MÓ4MÓ4MÓ4MÓ4MBCV d  ˜´ÔbîE—Î9(-Ö`2Æ˜“–‹ÉBÊIÌ%SÈ-§Œ!C£ØBÇ1HbJ)d!h±ÅV:Ç ÖZkL©”Y D p$	p$	         8  X…†¬ â £iğ<x<ç8§ÁóàyEˆ¢ã8šÏƒçA!Ššç™"\ª[†mk'šP]¨*l¶         ÏóT®
+×…ìB–=ÏSU¨*\²Y        €'z®
+×…«B–!Ëç©.TªÙ†,        ÀEÛ†,C–!»eOm²Y†+C–        à‰¢mC–!ËeÈ®'Š¶Y†,C–áº    L(…†¬ ¢  Š"Išæy°,ÏEX–ç‰"4ÍMš&Š¦	ÏEU…¦‰¢ª     À  ÀM‰Å
+Y	 „ 8E’,Ë²4Íó<OaYšæy'Š¦©š°,Mó<ÏEÓ4MX–ç‰¢(š¦ªª*4ËóDQMSUUšæy¢hšªªª®Mó<Q4MUUU×…æy(š¦ªº®,ÏEÓTU×•e                     FĞIF•EØhÂ… Ğ@  `bL1f”’TJIRRRI%’Z*­eRZk-ÆŒJj­ÅXQ)­¥Ö2*-ÆÖZ&©ÅØZ+  ìÀ ìÀB(4d%  @¢”RŒ1F¥TŠ1çœ“R*Å˜sÎQJsÎ9)¥Š9ç„”RÆœsÎ9J)cÎ9!¥Ô9çœsRJ©sÎ9g)¥Ô9çœ³”RÊ˜sÎ	  *p  °Qds‚‘ BCV ©  Ç±,Oó<Q4MI’4MEQU]×’$MESTU×¥iš&Š¦©ª®KÓ4MMSU]—ªziªªëÊ2×EÓTU×•e         @  x‚ P«#œ² È   AH)…R
+!¥BJ)„  8  ˜P
+Y	 ¤  Æ0æœsJ‰bB)©´T!Ä„RRj­iŒ1¥¤ÔZÓcRi©µ¦Rç¤¤ÔZŒÍµÎAH©µ›“¦”’Rk1F)M)%¥ÖbŒRÚšRk1Æ¥ô9¥–b¬5J)¥Œ­ÅXk”RJ[‹±Ö  ÀlXá¤h,°Ğ• @  aŒRŒ1Æ„P1ÆsB¨cŒ9!dŒ1çœƒ2Æ˜sÎAcÌ9ç „Œ1Æ˜sBÆœcÌ9!„Î1æ„BçsB!cŒ9'  ¨À  ÀF‘Í	F‚
+Y	 „  Æ(ÅcÎA(¥RÊ9ƒPJJBAè„RRjsB¥¤ÒRóœsB(%¥Öšk!”RJJ­ÅÖd¡”RRj-Ææœ!”’Rk±5çD”–Z‹±9'c))µcŒÍ9KI¥¥kmÎ9§RJ­ÅXksÎ9URŠ)ÆZ›“RÚšZŒ1Ö¥”Rç–b«1× L  lœa%é¬p4¸Ğ• @n  aŒRŒ9çœsÎ9çœs”RÆœsB!„B%•Œ9ç„B!„RJsB!„B!¤”:ç„B¡„RJI)uB!„PJ)¥”’Rê„B¥”RJ)%¥B!„PJ)¥”RJJ)¥B¡”RJ)¥””RJ!„PJ)¥”RJ))¥”B¡”RJ)¥”RRJ)•PJ)¥”RJ)¥¤”RJ©”RJ)¥”RJI)¥”R)¥”RJ)¥”’RJ)¥RJ)¥”RJ)%¥”RJ¥”RJ)¥”RJJ)¥”R*¥”RJ)¥””RJ)¥TJ)¥”RJ))¥”RJ©”RJ)¥”RRJ)¥”R)¥”RJ)¥¤”RJ)¥”J)¥”RJ)  èÀ  ÀˆJ±ÓŒ+À…P¡!+€  Àé¤”RJ)¥”RI)¥”RJ)¥”R*	¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”R `t†`ô„t’Qe6špá(4d%   ÃcŒ9'!•˜j¬”rÎ9Ç £Sm5FJ9çœsRŠ©Æœƒçœƒ:
+­ÄT[ÁsÎA¡””bŒµçàZç ”’RK±ÅVco­sJI©µkÍ9!B)µÖbŒ½Ö„tTZ‹±Öœ{B¸VJj-Æs®=!\+…ØjÍ5÷ŞƒB¨ÔZ­µç{B!Th%¦\{¾ç „:·Vkî=÷„B[[©)·às>!„2ÖZ{>!„BbË±÷ „B!„¶æŞƒ>!„BsïÁ! Èp @\0’:Ë°ÒˆOÀ²
+ ˆ € 0  0Á  À
+ve–Vm7u’}ø„ØŒ¹”Š™œz¤†Z¬;´‚¼ ,4d% @ À0¡ƒ{dbÌAëBˆ1(-g
+¤”Ø1†bPZÆ˜BH1isŒ!¤ u:§rTRk)„Z¬9×ÖRŠ   	 0@P0 F:Ú  2BƒƒL x€ˆ
+ ¥]Bé"Èâ'n<qÃ	Ú@     @ à  ¡ "¢™™«°¸ÀÈĞØàèğø 	       ø  HH€ˆhfæ*,.02468:<>@BDF      @         OggS  €)      @b“l   "#²sÈÀÊÅÁÉÅÌÈÏÄÉÅÈÄÈÈÅÆÃÉäª«L¾•“n:\#MÇcCk€ êĞ@ À(€l–“ÓÔœÅéœöK—3e´°0ŠPÄËq8;ìZÖùû¡ÿ  äõÉ×j 17k­¥WáSĞÕ¬‡ àÃŸe2+kåõöª¶Òûgûïìš‘›b1zç†úì'¢»U·iÒÔ©ñT³ˆ]üîzÆÈŸ÷Õho c\o0=`î¿	 `&“D*	FBoßqèEÎåê	 ¤“‘êª#Ùî×Ó\ ½‹òW+5©   Ğ6~ äu™ío(Şçÿ»[  ¶€f6ó]èoù ÈÛ¦¸Wğ¦•¾ÌF.Ï/bğ×lÖ©^—à¿úˆy,= dûõZømëŒ‘%ø7ZZ¡¯òAhª£B~çRÇr23[w*³¯ãf–œ”1Àéu ûA¿  mÁÃÑx,  $éP–È2)É‹üŸüÃÕmÚì—âÅõq©d,ü@İ…2ø3ÃæÅ¾s•¿”   ^6  À¡Vc„0/çïKĞ¶| ¸—?P ¸İ¶¥-]"tá«å¶ıL©¨`æ" Ûİ¬:ˆ3ê•
+ÑüĞÊûFƒçKæ'_T¢8¢m¶Òö˜·Ì·À{œŞ¼O·^·‚MyˆÃŞÑ:;V'1©-QãhdíÚÆóIß Äº€å²\÷\İ7 0W^ Dº ˆˆ˜ŠK¹9i~`_*NzQù.÷ŒĞı•(´Ï  Î½ƒ…Q*IÀåå1   Í  û®>6    ßòt©}ù@  °H› @ëÿ  zâß2ãİOĞÛï¯kÎ_m³fü(sÅBs"³f-í½_î"é_ï=º í£	oYà·q¬õ'¯-\RGö¹mM¦p ^×¢¿I\Ú[	w-|Î¡Â¤	ÀTçàö<šc°^ ´ûh À·?× €×". PúHIÉˆ 8<æg±{š|¼Oë#wGMÍ'Â4Õ$ z­. ï²VÕ’S7
+À ÀnÃŞ      €ÿÒf6 l&ßZ   k- àn°†Bnß`u>»ˆ´£Cf#UœËøó†’íh÷dÏ^Ääsî&õıËİŸ‡®Xkñ¹¯3Ëp;=@^×’»x¤‹¿åˆÔµà˜ELa(Ñ’ÆÁöíÏ{ƒÏ³Ï} 5 €s^ĞFÑ  `Ü–c {õ ú R ¥/€ˆ“1*Ó'n_şí\KLÓ%ŒÀnJÅ¶@¡—òXê ÀXÂ.±ÿ-  Š«-  ñù.m @~ê… €øA€ Äøöcîé   üs€d*c-FªÏÿ³ÂŞ:¿7öÌÿRÔİ<t)T}´àÙJïS^×²GïÀ£„¹•<z*d—c€¯ïë=Ù§	À	 ”=ı  XN¾ ¤©0’D¦%9Îkgã¦üÉƒŠ–ğÜöíßö ûß^%&»å^  # Gx[]ş¡     H¿ €áğ®+– @l›Œíôºçû7Ì	$ l}¼    zıQ†‰ƒJ³Z„ğÊı6 ]{œC,sæ29oŠÌšõ†æõ¡]]õw“×í}ªUIù”â­äô;Ó|OŸp >ç²‹»§?9zå\Ë½q5.‘;É8tû/‡O`ügç@> €¶¼¿ ùH°ÿm  ·‘ $©?@
+’‘tI
+½_ÜŞ<C‘¾òÍõŒ0O’Sä^°Îd
+@.Osc#†	+ Së    – ¹b‡  ‹S[   ²…úŸ‚  õ™ÏŸ*  Vé& ¦éz# pÃK ¢06e ¸c.ºäôÑéT-´gŸÛóê¯BZ´©VZğAŞ_±˜çà ^×ò;ïîbı¨BZ\×âÜ¬n	½Û8˜Æ?\@>_Úô ´?Ï €ëştéi àîkt  ¸W7  K@Å%#bDÙ<ï
+ÙAo½’1ïâûı|t@¡ƒüÈ‹d ÀàTyòp €ĞVşäÓŒ   ¸à¿eJ  Ø<Ê“j   Àë÷ôŸYŞ   	—€1@.p >¸6€3q.*ém>OòÊ%óú\š¼¿ÙrºÜê\£Nÿ1³SÓñçÚ) j ^×²‹ßÅÕğVò\4çÒgoÌn9"Mhèı}Àóú ò}  Ìş»  *Õ'€LI’sI€Ì’·êõ¼‹¼o¤TûÄ.ûş›ÈU¥½?r™ŸD;ä$'ãI¹ICGA     ¿¦i1 °ßn/§  æ= $ ïáş!™›m¾ ê¸  nM€ÅsIrs …ÿ*İ[‘ã¹çêĞÇ¢DÌÌºë&‘ˆÏVÚøUÚ_“T£-¥ıƒ¶´Ö›yn ×òkgs~x+êZöÒ[	Æ@Ç	§‹°û È3ı§a¿  ô÷y­  ğZŞ®  ™™?5 @(’¤LFÒîŒİÉù’ò“Ê†ûè°qéltº¡!@¸0ç§)[    äãİ~ß     vÍ—m	  ]Mü   °åµwï}~o
+    `¯ f¤P¡ÅDUØ·gàAZÄ¢ç.œ,Ûºqé|ùC˜oÔŒI>üÉ?$şR)mSn†ÜDÇUmq%3d>×Ê‹1ó‘[Q×’G?ĞÃPò½Ü ÓøÃë€ç] D{ ÜûŞ  ÀÍˆ™Õ×  Ib#¬`òúuE œHU²İ£Qòoîêé¿Gw›Ûq°°@ †ÛÀ†ç¹Ñ†C+     µ‡Áá•   , °~Úg  `ãéœ± Ö/  ¦,©ëƒ+3jƒ§Ò p(Yæß7M> ‘û{cª—û_H]nê’úİ;‘¹ır¹\Æøú\Œ‹2>×ŠkŸTûˆVÌµìÙ1Ç%‡&hÂBÿß×õÄdÿÙ<úÀIà÷ ù  Äm¿ Àsá:  Ò‹Û 0)‰LEHĞ£õvVÏ|ssº7Ñç€uqó±Ä…ûS;$GØ6Ä½lkz² u¿/„ÿ   é,'V€ GŸü‡jÀ€U/oí   üN äw< ¯Â ÀLõ“6 *¸‰Œ1²>{r	Õ?«ÿöµxeÃj¢G$u2ÃÔVšI×ò‹³Š¹}¸0s¬xtczÜRãÀøGmƒx¢‹; ùw€¶è—ñ9hôp) à.î  ŠÇ‰‘$BU>ë%/ö•AN²,7SÉP U÷‹\4 @ğ?GÏâ	ÏYË €C%@A´²Ä6   $™Öœâş{áÖ H?Ö¾ ıù  Ğ~˜”äèw0 f¿Ü³üY   1“©÷$§»c5Úü÷V÷ô´ÕÜD»çp}÷ÉGnXƒ>×ªoÒ‘¹i‰ÔµìŞMºÈ£Ó òıCî{Nñ€ ¾ûX Às$ °—ú	 @2ó~ Ó$’Œ„S?»“n#¤8ŠŠfÓ,k^Õ-:¿ô÷Æİ<PÔ­eÜäİkíx%ê6»\    P<Äı      Àâïõ‹¾ˆ *‚ş¬   d  (–€ôW P@Ö
+@€Ìá`í­OwyYÿ,mQŠüÍô:Óv.ä·‹Şë¿w%Ó[3NæL >ÇÊ£Ï$Ş<‘9Vqô¦9øHÈ2´+ÿ#`ÄõWLæ X¾§°Í0z n£W Ò™Ï» DL!-#rÇJvúw9S§Àj}ìï>ï½•¨(ñµ‡ğBX; ?­%     dnÿä! ,¿{    â¬Ù—Ÿ­şúKŞ¾Û p  ÀÇÍ   )|0}H   şÂ   À€L_+ú]Ó÷ík'©O÷¦‘ÚÖöÄb‡¿÷ùøo4¾üùy¹ñUŸ^eÇ²©ûP.ùç¸“æV|ÃÑªŞÚèµš¸ xşÀóEß€ Ş‹é¼ï+`ñ> ÀâşW 5³ÿY  a
+Ä˜K	Øâëg‚“İ"0×¥›ªÒÉ­´è« @TQ©h[8è¤·Å«K/ÅÆ(  (è« ÆÛª    n¶¯@åÿş  À% à\"ğÊ—$ à0Å,€qzYD?6Y«-{wsòEÿ¶Â?MÈ½©Ò¦M?wÑ_CgŞÜ¼gÕ¦Ap
+>·*f7íPîŒkå£ñæy.0øşoÀ¾şÆN Üw à×f˜ëÿ  ÄLş	 Œ“b¦%´íI_ßfó¸«q2·¹¬Î£Ñ¡*¨¢FíÄ8§2¾ro£    h½ÿÍ^÷@B ğv±€0awÉ  €Åıòƒbû Fn>Ù€°ëŸ HôkÅ[€ÛPP÷æ €{ü¯  à!¤ª6íŠŸvQ'©!îÏ¿Y±Jg=´âß&IH;7ŸÿĞT\äÇ…vÀ>×*f'~£PÎwÂ\+îm0ñ(!ÀëÕƒ}ïa~À	¸NÀĞ>è	`3K  Jbœ$Aa¿í7Ÿ¢‡ÑŒÁ25mKÍwäTuòø–1€ïŒA.ùç"¡’›’0  <fû=A@–vô³  À¯`z};ü8Ë« `À y}ù¹   ğøµ®`ÈÄÙ® c˜xxÃFIñoÉoï^X&ÚU}òÌÅäŞ&©µWˆ¯ºÑ$€>×*:7\e&¢Öšc'7¦ª-…M °ı»ÿ~šà~c¿	ØÙÁù x‰·€R= 2@’”$lr½?{ÓGàxŞÄísòQ©¬*€*4%g¦’ÀZ›oëÈ;}Q„ Æô   ôiú­@¶˜ú>v!  €Å‹1À‘Š- Ÿ×   À >4ƒëc¶ğ?À8w#sİÚ›î
+ù^fö5ñù²ÇşN§È¿öiI(Ñ©.©›8>ÇŠ³"úŸç;inå7NÜÑO)ÿ€üØ­v ùŞ  ÷X ^ícm3ÿf HâbJIÊ(QnNšPCÕò«_ûQ|ò·(İÕDcEE[7@`v*IR’!   °9;ª/=Ê à‘Ø Ø—  P:›wÓ+ Àëí» €7 n÷Ïl  ÇÆ— û€0$gæd­¾=Y×~èqİ"¢Ãñíºó–¸«£OšŠ9ÎŒá–_×Ê³gÂÄ›'2ÇÒg{
+¦ØDfˆ Ğ¿	Æ =  ÛÂ6°û  Üö= bæ=ë  H¤/€˜UD #õMùbÎ&J4s†t—kË×¬'˜şÛĞUuŸˆˆŸ7- –¤p·´İsù£±A°\x    ]‹ÿµùÆ ñ~   f^r0  “ß    Û× `-SğÀ@å>GÎ[*õÑØöøIZ—Täß¼Ó©íÒNom¥X›9üŠÌëm÷öškÒó OggS  €Q      @b“l   ¹@JîÇÉÑÍÅÂÕÊÉÎÕÌÆËÏÒİÜÔË^§Š³w>J˜[U·Ş(C$ àÍê@^. ¢…Àü;  ¿% éÅ} @˜i "f9@Ï½ë‰µ¢Pâä’Ù^q<Æú×Ö_tæl†±d3bêÍ€0õç±OµÖ».ª¸<o
+!  =×U €İ›  p¤%×À˜DÑëq…»ø   €;*ıwÒ<ˆ Y±L0„L—İï’Òë`åí3Ëìv-P©$ÒH4«!!„;­ÁG…’¹LqÂ >Çªf'Åµ<b"[UG×¹ÅÆ€é—·×£yŸM ì[ï à»Z' `ÿil è€ôâ6  „i§8MH¤7Ó²E¶e%›‹óQ`=(ˆ*„—ÿ‡àd €…6‡æ   Èİ,Ã6`ü½°À€Ü÷7İP  @iòOóvºù¿®1 :ÓO €Ïu à÷ÀÀ}ö  ®}_€€ÀpE-¨Ï¤µ2iÕÛí:R³UôŞïşùé_!‰‚¾f€æDÁŒÀ·ê-6Ğòãƒ•4×ÊG7fRŒÁàñ}Âô¼oáç@Îß®Õ#  p½tÚ Àbõ}€@:óßº  s¶_ "S›$ªò§Y„TX7ïmH†~\÷´UTÂ†B ’†,)€²8   LÍ¶ì¨º €fÍ7’XÄ¹c  àÛ€$Òºç±ƒ¯l×- Ğ77)Š Ø½×åí /÷İ2ƒp¼g7Ôho]>Ix6¾GRÖzU­#-õ‡¨E}ˆ¦+w®8¤Ç*f»‹ÃqÁ‘ºVÜ¸1‡İêáHO ¬§y®¶Ş À,ÏLÿpuï Àõ:5 À.	  Ìô’$	,úOïb­æºè³äò²EÇÕéi•à³¯uè…Øv†û, °e}×§áC“Î€Ûºª   ä÷{‚‚ j–5“   úS     öï =ÔY   À  ÿ&`rü{  ¦n@)ğ¯W=Fk÷¼4ŒÊKêfÍœ<½Ş¾Üşÿx¹[Ú+¸tñÖg}Ğ«(Çê/NL·Ÿˆ8U0ë-1¬ø6äı[Óß PËËâL°˜<€¹¯}“ Ğ©€0ãŒ¤2©«£uL‹[ŸFÜ¤\ßrnPŸKfcĞç»0YÇg‹4Á@ ğ²½Ÿ  ÉG?Œ|i   ˆÍå;-X¿[­   Hÿ [û&d `  € ëü¾ì é î«9ƒ  @!åV[)¯›ı]tŠ!ä°‹÷m<ZUî=PBéÿÎL×:Çõp ·ê6Å¤>|ø½dÎ•÷ÌQO9!ã€ı ­ûs«şÀÔ³ü;ÀùI Ñ{ÀÅt ÎÄ €4€˜%Iî·ZÈ¹d
+\<Fzü~Ÿ•5ØEPcïqK  l¿6ë±¾··ö°gú-€MWtD PiÖo   ?
+   Œğã°y}Ç¡Á  Æ|Ô Ğ7 @7|P¸¯ü€pE±ºµwb‹RSé®õ§šhŠ[İ­•ÎröwŠ)ÒİšK$n:® ~×*7®çGÎRêZyçJçæƒc0iÏ7`=·Éùk ˆú Äbõc,Àrö ¸Çq  îÂ i 1É™ØĞQ<ÿÔî‡Š_İ­ÎNGìO6FÖ„äsÀJúñ°àÊ €ãÖ{õ>·
+¨¢ÈK`KW¥#  ÀæÉëN  €V?gï¿‡<ôş@ª}ÿ  @Ï¾ƒ èx~  æ€…sô± Å÷ôÍ7‹‡¾2¨ˆdQêşî7}W½¤ÍFò+¢Úú éí¶mï ^×ªg¢–œuÖ±zG7ÅÄ#2&ÿì<g÷ã¼ˆ pÙ¯§†}é `¯ €¬/ú @˜qRŒÓ„Š|ÊÌu¹Ì	1í…ŒzpÈEEØØ–-Ù€Åí„¯g  €ğGO ˜ö:
+   ²°Æz4ë›…}>ú¾ÏS	Ä£V*Â% 
+@ÃGûöúPĞÜD    ¨>—eX×ş,"[ÎN>÷©=bîë*öIû™W”J/hÉ¨_(ôrŸè ÇêNòÎN9’q¬jíîj§Hl¿ŸN İßä¯c€g î  À¿Q Ê¥c 3×7 €ˆ›2Iˆû9ñ»ï;VãââÿâØüíŠ ¢ä3ÖNŒä•ß‡uÃ
+rTü6¢    ”æèŸe   `˜Ÿ×Ç1‚‚ ´   #»º=}ß¢7f	 @ö@mı»Â€ Ìaî( 09¦:ëVgzÖŞúIYîÌ›™™™[yû†ïëöÙænD‚yÇg >·ênòÎF> 9×*v>]Lá)K,`²?.×O¾.À4áû p»º öø}   ÙÌë  Ò ³’¼êqËµó¦x>:èËæMí—„¢¨üWeT\ô_­m%   O^È Ê¶@ üõ&  °ÇÒ<¶ @û³  (Ş•  ºWş²?Zµ÷^m€ØH Iê  Àµ¿@`Ç€f5Œ9mÛËdQ‘öü¨~
+t]ùÖî$Z±ÉF/LÃÇ>Ç*£‹ß*.é¸Vïê$Íáä"Æ@ºüûŞày÷æş £	¸^@hßh :ÕéÛÒ É8’ÂG{O:éåÏ¹º)ùàêhP©UÜ'# `‚¦bXT£N`ß3‚@ÛåiA.@ üÏ%lX p^úŞ €€~Şl  `ğ%  €TÖ¿v?êş• ŒeêşÕ ¨Æcï€ Œ Ğ' €Ğ¢ {¹dó[¼}Ş1µö²Ş~¹üwÜš„µHô3hÚÊ^vïç2é ¦ÏşÖêoÒ!7‹8Õ?ºIS<yâ&| ú_Óày/ö_@ğx€;·z m`1ˆx1e¥÷úL¯šLCIU-Ò.Şí›3ºßYNİ|òb­ˆ µ©sb  ÉçW¥Ülö‹ß*Ø€$ãC%¼Æ  @†Ó{†  7şüj@NÁT ø‰/
+¹± uyõŸ1  È+½  0Õ‚sI²êå5
+'‰öL—™¢ÅŞ„AvÍ¡.Ÿ»¸{S±"İ›ºè^×êm,Š«ŸÉºUŞÙQ«ñ”+ØnìÓšuö}ü€àkSÁ¥  q XœâRJ)W";îoI¬ó²ñæM.'z²4®®u‚¢„×©.X>ïn`X~wæ6IE#oj €B@k4¿ÙóN€ö	( p$%4µe €L—Ÿ  0_  ¥Fpz€Oë{•Rm‘¿[ÜE™­Ùj½z½|ïÏÒ¬{B[FküW‘;‡^·ª÷¤T>’w«zãÆ…ğV§M\5@<€±î—W4 pŠ®%  ˆç¥é Œ Àb(­¤^ ’G„:ÿîw¯ØizÅm´…\g’TÑÂp_I§Åï+  èhºXL–gâ`×fƒ  dĞiÊWQ  à1s €~pı`  ÿd   à©„h0-n~V  \ 8êŠ¹gƒ´Nò¤$=¢Ñöö
+IÚ›ÏŠFß³*©¤‡ä˜†s ×êÍÊä^ÊíW’s¬şÙMšÕ’"Æñ™<®ƒŸF;/°ä ÜûØ  À´ :İ{ Ågã ))I¼¶#LJ::y^*ÉÄã¤y Pÿzc8½¿ €àÒ¾×Œ*   €­fiş­>Ë0È•ÙÙ  À	   ƒ¶×l7_²Ÿ$€ @ğóK*\ ÀÍ\p§çV   Àç 0ñÜ4}s„oñy\\xŸ½Îü´ˆvşy2¢¡©Öº·iIòÁ ş¶êÆÅ¼øÍŠ$çZ“““bfË‰›x`üŞÀãîüÔĞî³}  .‹¿× " 6w  R€qÄˆ"{~{ıÃ¶Ñ¤5ŠD«^/»å»Jg¨Ë¤qÙV¥á‘'=@F ¦ûMŒÆªJwh<   }bs x:5   
+£#  ø¯ç  PH_yøV¿ìíö ˜ØÂ% À¡„û÷÷
+:íÓŠÖÄc>$Éš5NIşÒ>ÓTJÓ']yÙÉ¼ñÒR1¯&Çšì¬ÙTŞ¡¸Ôdgá&6'i ò€ö¸7ïg Fw°Š \­c Ëø höú ˜™~ÈrRVÏÔçÏêyb½oÕ²é“ëŞ¾ƒõPí_Ôm@ˆ¨şïlŒ0br¯= ·?È Ù4 WO_~ªä   _G  Ø•/‚lããŸÑ   MSŞróíÀ –»<wCBZNÓPºİZ ”ÁÇ àarƒh4í_¸LıÖ‚Õ=}|>’ê+{«Ÿ{n.’$iòMû“3²ï²îfÚ˜s Çš,ÎÙtõá8‰ßXÓëşpDš 4&¿ş‡ëşâöã	|ËŸ"ÿ\€ë# `ù™l @é øl¿  ÄiF«h¸şÛ¤½Ï£ÎowóØ5WVuOûÃ™W­CÚ*¨cÛ5 6ŞvcJöù²Øj[DP Fô7€$\™9°Œ$  Í-    °œÿ   g>Ï   0ìÀ;ÌÃpf9Õõ¸0  ÌS rw{îMúÓHã#ŸÍ?Ÿ´i£ªî¿ùsöÖÛ]w÷­¦ws÷ä†ä şÖZ][¸ªŞLJòµ²q2úf‘Œ\ Oùmöómÿ€| ¸<€u  ¾ıªÀı
+ @àfÿ]  „'ÓšD õMú¤ßª%"U;µ—l1ü™eHTÂ5&»Çã# Q\dcl0W	9AFõ+     ªZø üì±º }  `“t    ¶|N €^ßIys< ¾,   p`p(˜—@C>(ÿmïT›öc6àMkñYˆV[I³¶o]zvV:N§×§·êÖ„£¼ySâZÓAq¨“Ÿrº	M ëß¸?wü k  }ŸÅßË ßõ+  ÷± À¥ DêR/ ‚¤©#-Ô~‰ÜíîPâeÑàËa«ùõ®?xÉ¢¥­'c  ª~  PI®Ş:¥X   À¿¿  8è?Š  @õ  F°V¶   {'Q  ÷5     a¾M h³€Ç1:`’É0”nç]›Yfƒ§’æŞÉÒñ}Ù–ğD? q[Á OggS  €y      @b“l   ÄÑğÖÎâÙÕÏÉÍÆÉÅÌÓÄÒÏÎÖÅĞ—ªeÂÅon¼­VOMïƒIÒ8ĞŞşëhğ|p~ n xN@Û  Àõ9M   à2×ÿ €y €Ó 3Ë  Æ”¤|NTsMg[ßd´Ùğ7.«öÚ wÛ»  ËÊ:)z¨{aÇ   îÁ|W Q    „”»İH 1Æ(6 lêç  N   XAš}ìõÇ×]¿†…0  €?Wÿ PTŸÙH‹¿ÃMŞmxàbIó‰/ÛGÕ%¾Äz}ÿ(/í—skT^·*{f>Ìµú{«5tj Sş§ûyğÖÀÔÿ à:=Èö €ëìë  ‹ø  è™ı¯ J_@º DŠäzBñzLïBª«Âj”Û®oïQ;˜¨ı» ÈÓi Àıÿpfæ‘ı   ŸÄ2„ îwÆ	Öô)Ê  ÜÜ~$ Àïà±  h i*f  èK(àø€-Bç&{f©}Lş6cù³J”Ïºª·¢–¿±¼Z·£c¶áğ×ê¯5LçæˆãV+k‹¢ËÍØÎØ€ğè#àşmû‹@wÙ¬ŞØã¯  Àï>  °Y –şÒ ¡]+Â¡]z7
+YÜöxéÏj:÷ÍD.i50¹.…@ÔoœÂ„)|7|l¿çÎö:•
+–«€ °km¼°¹QP´~iè  ŞEğÊSµ  °zÙ     	¤ï±®Ø e˜£ €ä0€€É"n=rK	©Ïö&Iô))HÿİP´ğ[µM}(/…-Bkd•ºC¯Ÿ^·ê¥ND•?øîŒsMö¦‡Å	¬W,€G7ğ|òã+€ ÀµCÓ[  €şl| ÀÌå Púfò ÇG1J,ÒO/Î¥ºh»Ş—÷ÿŞùB@TÙŞÏ@È.­›©ş«ş IİE„ 6 €$+&7Kd!ƒ@€  @oáÛ   ùG[ ¼"  `ôÅÜ½ÖúğŞŒ 2ğeÒ@(œàxœ}v@ÀLÏÖ›ŸU¢–}×{ûË~k+ÖÎ¯Ã„µÊ`½{üµZñ	3Ï¸GŞÆš$VGùSøZ9·Z-š®¦Àû·q0Åÿ¾ƒş$o? ùé Æ~x; ÿ h{àf®o @™) SL·'÷±+W—»*9ùmV£ë{á( Ónš§İ`S/Küãë`ƒ @ßkrm øîI @‹m  àù}a    !ÌèÈãóá·4¡>ÆÑkk¸£ ÿ¨„	T~~¼G ûqÎWm-š?WEr$Ş§`÷3¶·™ytHZy\)­6è¯î,S ·šÍk{‹‚Ôµ&³{JU½ùĞÁÛ8°?øĞîMÿ ùì[ê,ş€ÿ~] Àİÿê  ˆ™Ÿ (­¤R™&Í#™Çƒï=ˆ	ßM§ñ¡>@LÊeu €Çî/oÔva  @¯Xo     P ·Óa lù3…ĞÔ? lz›ÿ Àpús†  ™İª·ÿ˜=İ_ @
+à ’b"Æïá€v¿
+»Üâ³%Ğí264õÑD’jf²Ø>×š¤w”‹w÷ÜjegSLq°(ZM `~LûŞ¬ÿÔ  Tquë @1ó,  ´ RO ‚“š‘EmµU×/y7_ÖNº}œĞyáæ[«Œ‡œg×áÕQ$êİw  ½Qû½œ‹ABW?"   ei:  ?  Â»)  X `MØTµşı?`ÌİÆ ÀiH@. Ø€›áõ–¨ªÛ§–¯jğ¹˜zmmŞIüJoÑ;.•8áZZEó*w >ÇšviæÍ1ê9ÖÊÑ"õZXB[Û8 úÏœàşŒåñ“· Ëş·€¼  _û Qp3Ÿ °˜„â”$Ìšêğã°ù¯LÅğCËşŠç_T¨/Ó¶  8{C7¥ ØÜ}Æ[×– Àp´Òìˆ Ààl•  $7ı¸õª}åS€¤!}» € å}ƒ Wîüâ1õ €uS  ÀÀÀû
+\Pï)~±ÏıRšô}älz‹öš‚ø|Ä…®¡Mò/?‰áşÆš¿Q•¯”¸ÖÊÚÂµé<×7øË·˜ß_~ Nà[ÀÜê ´M Kõ' IŒ‰P¤$¹·To~ÑËW÷Öå;·¼‚ zğ(—-„AóšöÒC6@ª!WÁÀ|bõ´  DèåË  Ğ Â¾‡gW—ƒd/~‚;Œù±
+Ğ>  ¼› 	üéÄDw  à@Ö@¸rê‹?Èêx³qÿq™dµï^{Ôm‚å…˜vvØN2}ıÇZé,\äÃ3É¸ÔÖb‘Ş,h‚Oüó@‚ıŒæ¯Ù¨— Àâ}\û´  À½Ô $3‹ ©Ä‰I¡^êVóçğ™ÏIoCÚÅü«­Iå¿zN],ŸVn"PaTKÆ„=2Éãå¶1ÕüH D   ¤f"İó¥k# ~md   Æ"   ¶Æ  @ iV€îÆ“K   0PH@F;ZÒi’Y(ébmjâ^ÖitóYæÒk}X4ˆüÜms8ş–š6»ãÂ›ƒ:ÖtíMšY¼pº	€À¿^·À¾½w ™€ó<0®Ï  ãgñç% ÀìO t$3V  ÅcÄ€§Îe¯iûôÜ“½°ÖÉ‚tÎ}³+¿s¬Š‡rtst—F$Po,ÈÏÑÆ @èİç: $àÅs  #=   ÙÉï¹& à¿0[ò   œNb   €#(’ŒÓ9ûK['fû+,©9ïëç&á.w“ÙÓ¦ —š”FÅÌ
+q­Õ£…;H&ùMğ¸öµ ûxí«Ø 'ç§-  ğõ}{ €»Ï¥  6óøÑ ˆxB1"+å0	xz9;şî,ÉGÕºëOdû4h-9.×ø¯¨¢±\ùì…l
+é’ÌC¥  `ñÓd    @^ƒŠ»)Ÿ€_0¤ëy  ¨€ àÙÜè¾q  €î›   àïÔ ÇÜlÔ»ßsëXÏş÷ú.³Mî-O2ŞàSƒ)“úÆ0>·š4£+‹IÏ±¶ö6EˆÉ*âî‡1 ø+7j@pİ ¸: ®  îb= i¤”IÚIvò¡GK¼¦[OµS»u´}+ ĞŠş¾$ºÍ‡ÒVµîŒn{*  €¼Ğ*â D$ìÕ£iÜ €z^s«7Ïï·Û‡  °µ¾A `íıƒ¢ MAZù*€)àÀóû¼§ èò<@  †ñ—ûßÍ²¿ÇÆjtºe0ÂùÜÒ"Ÿ>\KTÚæVnÿr}¶õ% >·š”F×7éÈ®cMGw/z,úìdêü£Oe¿
+@Ì: ®Ëûü{=øÕ	 €äÂ @ÌW ƒ -9ê©<oçÛûøIÆÕ¬‰gÖ{#€ˆƒ=Y$  ¸Î-ó¼œ®*àõÙ ÕùY+   ©Œ   Z$R_ÿõ€ÖÂ7÷²U²	@¸<ß©:vàxU×·  €b0ıÎ^µhƒjâ£0äÙ%o_ïÒHR‘&’O3¾€Û ş¶Ú.ìÇÜÒq¬­Å=“’qÀ{ÉìçÁó€øN àŞ€ 0‹ù ¸º· tÑ  ’Y—+ H] ‚sIÔÍ›Ö:R½–H¸õH‹C^¶f…‚ˆâb¬Å  0
+Q‰FéÌ)AD‘@FX'õ À ­›6·ä 9nŠ  `§‹ `àS   zñô§-­VsÑÚ$äá²<s“w À`À¥’›IõøÑ6mÓ4­h[Üı¹IUXıÊ‘ÎÄ³e.ÓÉ“ëyîãà ş¶ZmlÂÌÇÓ9®u°sRÔ08ú•©	 ÖúXy€¼|à« Äã€…~`î“ @{è‹õ	  ›ÉË  © ’D„´‚—ÑêğÅ’b	Ûbíª\@Äml^Ûì=Z¾€Šÿñë Òl´lHÎŒEh„ X>ÈÆ ëÑê&  `ÏA  şï    *ŠöC![ûnŸ_
+
+¥  2 à×   Ho@m4Fî.™ÿ¯ëıø›÷Dd›5Cîfÿ={vîíûûí¯íë\úÇbp >·š¤Ê,&:£=·Zİ˜Ï)¿q`ªÀéÏx;0]  ûu~í ¾ÄâÛ  ìb? J€I$‰†—µ®ÄÙ"Èu×Ë£ù«[ D5ñ‹ €Z—ÛÈjû¼Xt¹¸Ï… À sµ&¹(  ~=,  òêšÅºŞ½É6Z   PòËƒ €3Ğ }õ ĞÏm    #X{mÿy½üR·¨üoÑFÛâSrOã«ÿ]‘ûï¿Y¶İ½bÿ‰yg—#>—š¤r6Wºu«ÕEÓƒóô°2ãÀšİ7ø|fÛ«È{ öíİ!f Ïı'  öµ Pps>: 13ûk  0-9IG=eË‹2ß¨ e{¾¥‹ ˆ4…–2 #Ü%  0tq¾üT>  @ `½ÄQDE€T´¿KÀ  .×  Îy?   ˜Åè¢Ãëy_L@Â|i  5£ï{.  €+Á¥¿Â£µîT|Ş%í5òk€¡q•/'i[‰à³ĞÊN >—šeÆäVPrµº³pµ:“Ô Tş>o¼º€€M ¦\Ÿ  Hg' €˜7 0ãÙ  0’šÄÂ]]ÇıœÜ¼wwŠôÄÛM7ÏÅ°Êöû¿— :^=g‚d!ı4<MK™G]õV  Ø†¾o±á§¢€ £ü  ÔW1  P›g  €ïUÔn     Ö÷6    RíWû0  M#Ì¼óï–
+]w.»¦~Şô¡
+BúŸ¤>§š9›Ù:ÿ^u¬•Á"Å¸$úÎh€©­Àí¾wÕw ¦ ¾¥4}i`4€;{ë ĞÌ£  3ão ©@0Å,¹Ñ(÷ú–®¿ŠN½‰dwŸ~ş—½Ÿ¶ó8Ì]5æQU…Ê^µ>G ’ÑäÂ«÷,öÀ™še€ @ 	ÆîïÉ_' `‰  €·è  ø	   @¡§oÿ\ ç¹ cMNú5IÚí-Şãñ¦Û­÷ÓâkşS·F×¦ôR”³` OggS  €¡      @b“l   sa'ËÍ×àÑÔÎÜĞÏÎĞÎĞŞÛÈ¼ÆÌ>×š–Æ¤tnŸ0Ùs¬íAš1®3ãÀê¿ñ<‰w ¢"À¥WPĞh×÷l  éÌcÑ €â3.  ‚´&Ruwê^ĞÎ“’×ó£jvZ~vyQP1FN=€ s»)¿û[€ğnYÈ € eà« ¢‚Tıo  à  @Ô¨9²2ú7Ë×1`@˜õcÜ@ª#~    Šğş¶İ  8PCîİd¿k&§("¿ÅÈK{ÒûYvF/M>®ä¥ª­?.e!½Î™ş¦Úî”ŠÎ‡o­íVÅDz*¥& °¿ûyòx ¾ èËw‚~İ@@½ nşc7  Ó ©[€`RóŒÏ3KíY®Å+Tªê+"IioÙRG»æä ‚hØvÙB €¹îc‰WOk`š=	 Xüaèñ   ­ßr  ¬~5    €Á¸.` Ğ‚nıØË¶ 0²  9”;\c&øŒù€ïRÃ›yãSÕàó—®®o¹È×¸J®¶>D5C‚>ÇZMeÕtné·ÖÁÚ Í:ùÆñû•x>mõÛ•Àì+ Œ}½;h7À~M €±5pèÙÏ¼ pñÔ r¨-qNKÜ7¶â.v'İ.ßÉËåğ€ŠÖ»§" /[vŠz¬3º9D˜   Œ0¼¦»/ £—ß\lÀŞ  ŞÖ-   ´½?~‘_ªû²   wÕ¦` ğL	@•É÷ß›d   8âÜë×CıŠ†6­ÏŠr#Òñ{ÛPPÉ?’ûâÎëÛèí` ş¶ÚNåœªúP¸½ŞV‡6©Æ¤Ò‘šP Zş5Ú~ÖäT İ  İ¸õ möù  àf  øÌùZ  ¥Ö„Ô³ü2­®&=ÓëM
+óVşâ°ú¦¿ÿ›2Ø«(áñT	 @ô¥‡‚&Úm·¯€ `$äü´Ùus €k¥Ë€„qùÙ‚Œ`4%y  HŞ  @
+ˆêvüP`‡B?ƒ«‰§Öİé  ŒÒŠôç½Öä>f»V«_{&¢ÆwwßÉ–Ï„Æ””)İI‚T*ÿL—€QşÆZMä¬t(‘§×k{Tª›(º7 µ_€}ıà”@^ €ûÖ ÀT €›y=º .&õ ÓDDàñÎFÿôúº*¨U7:”—ÕšúZu¢…ô_¬ˆ
+[3«€è.àÏpí 0`Œ1ùú.X¸@  /}% Ätß  àò~b  €7Ø  À
+hğğ}@ ÅM¿BğnPU   GL…/2ôƒ´/ùÍI~imšo~Ÿ®Ëı×Åß¿kïg§*>ÇZmÊŒÎ¢“=·Úš5LˆN§u–5èµ ıyätew »Ø àºóÀ87 Ü_é/ wÕ¾  sÆ; @
+ Á8)I
+ŠBÔÍ”»ŸQ é5WœÜ¸õÅ«§eç´ ¸kKê¼e„pÌV¤ÿÚ<Ç€ ²ßù«×Ï¬,`¾’Ÿ   ´·1  <µ­  àÇÎ `À @|>ô+#„ÌÇ)  |q€5 Øpàa(÷ºŞé½´A%ñ¥¸ó§‹.Ì¤¯_Œ"x·ı_Şíræœf ş¶:Ü1ÌÜ6“Ášs­B…¤Óç¿6@¶Ÿ>x³û±ãÊ °|mï –ÿô ‹÷Î ìÂ @2sö Ìä @pÄ!7Sõ§ßÅRıä!Àá½ÙÏ€¤*™ö¼ÑŞpPË,ØÆ Ø-Ò†,æUn  h®oŒ- eg®
+ €*ì$1  %    +Ø§­›ë 4—¯µYBAƒÃ) ñ ¸î;šO­Ô­Uè[ß½}:hÌ-é­Ú1"©OB_Šˆ >§Z-e‘A§sÄ­¶GI:p
+]¦& 4N¯Ü`öL) Ä/ œû à[Üç ôş °¹Ë `³=  õ ˆ‹KRá¥äÉdÿ¹+um4¿µ›ÎO9
+…ŞŞ«å¡¥ Äµö·m vl½72ÑÎiß<!   ŞO¼  øñ¿Æ9`xÎÏGŞ  1’ àïgb   €¶ÒÛáøÓ  ¸\J_® 
+€VŞ‚1ä‹•wnïw±»ovˆˆpSÛş³¶ØA—ÿXEHúóü«YÌu>‡ZMä„K;Y0ÇÚD pt+k âo%ˆ?ŸÆ~ 	 Lğş  úÏ}š  Àm› nöı³  $³ùÚ   ‚ÒD¦Ïp¦^ÿÿ]KKçuBG²
+¹*G®O»ïÆ7Q Q¥­VG¶ˆ  
+n¿Ö…Üü¬¿È F2 2ú×G.¯   `a°üwü ï¤,ŸC  æo	  xÊ,  ğµ') 0-ŠÀ—ğ@Á[Ş x¾Õş¦)KZ*mÿtÕ¬u~Ì¯¦_	 ş†ÚN´ærSMycÌ
+©*­•1Uş>A¿ŸìÃ ì¾gİ,ã± €q}î   ¸ÍúÛ`¡tŸ ™ş€JIé ÷ÁÒZ¹›å¢t7Ú™du“EÄ#'B=pøw"$ @‹˜Ô­sšàË   €­&ÖŸÇmu€ 
+  çÚ Ûì¹¯ö€À8?A   FC\$_xW£?ìÀQÆ	 vL®<À_<  À×Ğ5—Äûä¶…¢9_I¥ ıÓk³´ş†ÚNä™›q¬Ãkƒª¢ÓZ/M húO÷ÿ¤WØ§ ì7¢Àwu_ ÀÜ=  š›ß: P€@(Î2¬¬¦Ï^e¾|)r ÿ¾BÙôŸáéò²‘[ä»Í©ª*ê^²°¢¨ª(ˆm|‚U²»   ‹ó÷«Ö›¼* €ª³¢ ®   ç_$    ©_>ô Àæ{€©mÀ¥HÏ ¼xs;   p: ¼·ŸaİâÍçìIE>š¤‘âÚ¤¤u å§ÚîéÂI‡·ÖÁ `Tİzm€ğÊÀó|ŞÖ}UÀôy û¹  Àmùgë `_  àfóë À)ˆ„"IjDª¿ƒöô™„˜}>İÎÁû£q5ÍrïÑï‘M–ô @ÊvÏ¨¨{©(€T€SN>n Pçëo,@ñ3Ø Àÿ{À Àş½&  @`ŒÑ%NA •¦DºÿX×Ü|#   È@òŞHçó£Ú#5Ş¿Uw»KKıÕüaıÓYÇu>·Zíd7ìºÖVSHU7:½ÈÅûêösÕ Àw €¾‹;¸ï  ¿ı, Àîv €Íô @3ío €R"F Ö[\¶ê]ÖJPæ…ÂV	E•²şE#@Î³m	öld kÑİ¾6óq  $ À°`w~JSÙÙZ3 `ş™ŒÀ @÷õó~ÿ½mŞÜnşw˜$'E·â ~Çv   ¸¡Ü›È|»[Ûì¿³otëôõÌŸÕ÷CîÜ´ şÖ:40D¥Qiò·ÖvcˆNRèèÚ ¨Ë@Û÷§©° Àò'iú 	 ÜÅOŒ€…Ò ™¼o ƒ SÑXµûN›	OOÉµu52&Åì—•èí–m«{Ã[ˆF¶?"a©ã¾èO?µ-G7YYZA   bóòyñ‘gù;•Û ğÂ `0Ôéé%_/M’f
+'+d|>P€W¾   5úMêtmí«&Hî‘ïæ<“`¨»¿ÕnÄ›gõkå¹7sÂ` ^Ç:4(¤È¦ĞAÌ±V:Ù•	#ÑùÒ„@ÚşƒÙ  Î	 œÿ:,Ïì  ÏöËñ  =› €â1¦İ$·ŠÉçâDúŞÔ^º€I{W²>¸äÊ1rÊúYg]l½Í"9Í|á¡¢ Œ³Ù;” Ø°Tß‘o°1hÆ³m hBÿGàúÕ_   ˜m# @ ·Iv¸r±î¾ü™   £®î   ÎAòÅC‰Z¦Ÿ’%ı”WÓO•¿$õê´Áç«ÒˆÔ³Ğ*~­—ïı½…©>×ÚJ”Şú­• 5
+è»_š €×ûìĞNëŸò‹õ ëŞ€éØ®Ÿ  ®¹pé péÌŒ' €PœIäİÅ‰´®MMm?ùBIU,ëÚ¨-õwëx6ó® È}Y -
+( …2ò_¤W§K		şn» ’<Œ,€•Ç4   $i   àûn}é1€@h²üüz&.’AXë Hùp¦‹:„Ô[ÀA8„ëşN»·Ûş—W«¹#UM“äŸ¦»ÿïùŞ»‡«Ëä™{; >§ÚJ•ªU_$]ÖºÑ€©$èòjŒ~¥~°ñ®fä£®O€gæÎg €¶`é i¼ˆb^Ş—ÿfäCÚ†v$À#Í_·@Øïn? (n"ÅÍq#°(«UØ ÀQîÕ2@-=rúºg @ş˜‰   Íß0ç Ÿ‡û/5  -|éÀäf¢ 
+,
+®¾/Ë  ˜ pŞx   L}94oIiäÏLÍD(ª’Ï34É»×€ >—ZIµ×‘,Ótj«ÔzºÌp×a0U
+œN2Ö€zë#ĞÆòuk°:O`J  àuÓ  \“z ADäÆ+¬ÚË/j)Ñ
+¯&®Š ëøÅ¸e À~÷2¾\g–üÖ     °Q<|ñÔQ pëÏ3  ¤;   p=ŸTşüqë/à  Ñ7 ”ÔÑ÷½8'   fúşå    b†á>5©êTGœıN44st‰ ^—ZMŒI9(L’y¬­ÁÀM“.¯MğšÃe#à´ŸM9»k€z½ ®5°o€ö­€Å] .= ˜Ô @0b”{ô.ÑÔeo§$â×Ê§ÏõËyã*o®Òál>X>Ê_‡ ê½–l‰ü–³€µG[ ÂÈÊ¶ Ø>Üş¯C wç}      VÃæ€–÷M¿úh~%   Ú&±õ  `@˜Ñ´)   6ÛÔòàËíÑî;×$+ş¬|—&ìüoÙ~Šbş†Úv¼GnR€:Öv“˜Séòb„Ê×8QoÕüTZ: ®û§ƒı÷l Ğ{,¾_é €ÍÆc €¥~	Ì¼² @‚ “­vóR¥÷YHUÛó1 Oég0@õ/ÿKy/G  `úÙ¿–  HÏÓ@ +¾S+  Î.Û  $ù   kuWrŸ×à?^¾ VÀ4;Cõëù¨³*˜ª@
+û« uÁ{.àÖ]®òäwÕ“Hò>æ†‘èÊ²OggS  €Ë      @b“l   N¼îÙÌÒÍÓÏÉÈÃ¾¿Á¿ÂÇÅĞÏÍĞËÊ~§Ú.%fbPŒã9ÕvP 8Î—&€EÚØïã+«àİ{àun¼û  ú/‹ÿM hU ô… €H?0³/  `RQ®X}¿>Öa&LdÒÉş=~y•·ÄÂÔ‹1°»ò§uÉ  h\ûË.   œÓõ§K§ Å ]Îà¢\‹[ P@‡ÿe       HİşıP´p8Xx°@ÿÉ†<FZ.|Y´…Ê—»‚ä½‘«%à¨[6ÚNã1‡ZMŒ®L¶˜Ì©V˜]yhi&¬³Wí+—€G— Ø»_Iö¿Ñ à?½  ğÚñ·  vi<5 àf} n   Ö’FLë²YÛß¾Ô=T)„6×Û×?À[%4  ¸û€wsÆ   ,¼|º[.%è  €,sçldám°@…çß  ø¶%  p_«V   ¼hv{©àÙÇû¾Ãv
+bxáA‚4  €,ş(’IH1è¤»LL­l‡ ^w:0JUºŸ¤ N©cm•.¢è´N/« ı$XÖÕÛ€vÎÅÿí´3ùr €İBbñh
+ Ü§ À.Ü  ¤sûß © P$IÕ)/öõÒİ=°ƒ}Ó–g×r—B³qõ¸¾ùpÙ 2@½æ|»˜~k¿é®*°€¬µŠ
+ ¹ów  -¥ª€(Äë  ç?K  4¸Ó °öÕ,Pê® Fÿ @!|Á‚ –¹ wœ)æë2Û{7ryñ~§ÚNDePÉ¾c­–¡ºıÒ 1jïAÛùeÏ Ø— œ‹¹  ø[Ÿ  ¸ùû Ğìî/ 0ãÒ &"Ó¢ç^]/ºÙO÷ã'ö$´!ë÷åŸÔŸ–CåáŞ‡ ˆNåå»±D @Æã´<Õ8`  àÒu@ È¦çâ=¤µ"„±ëÎ8‡€(Ëm  T  üÀ	K°&
+S°D¥Yàƒ˜· ƒ¢0Ä?€0|@£"©¬§r'Ó1îiïä¾>w›¹×>×:”0ÒÄ¦Ò9òT+¥¡1£YtNÆAî:9ÿ[ë ò½€}Š+8·  ¾¾øt  }G 6ûç» 6Û} ÀŒë @Š)¹Bï&dÃ¾JmùnÛM¾õÛQD`Ÿû[1  &°´G›« €êO›
+ Ûµ³­i„0ñë2 Á¨ï	  ğ(6   y—›k÷ŸëC5
+¥•âãıÇ€Ø| §¿à ğ €90ÌåoZE Üº]'È·òğÖqù¨‘­˜u8>·ºà$€“BGš[m•JÀ¨t"c€òg€çİC< S€¹éy\}   Ñ; ›ıï €›õî  U @&#D<	­ù²œÔ§Óúg¹ê¼wuË«èõ €àxY…Dgúéq{– €¿òA 6ŞßXpò™  üLÕ   í¶¼½÷åõæÿèåÛSpO·R¸?ü(ê*‰; ,_Á×à
+@I?ç:Âd^‡SK ¢LV‡CLè”/ûfÇœëlï–ãP~·Ú2rÂÄ ĞæVÛ	ÁÍ@§ë‹10ú‹Ş¡}í¿?}§ ÌıpË4p³v €fü fò  "NŠ*5EÿÖ¾rİ¼øß!KzgMúÁàu–@ €9­ñëË|6`Ş÷-°q”ºH “|!$°l{)  ˜‡>  €sÛ<ØòpşF[¤Iü
+ oºŸĞWƒ4|­(äRqÁÃ|Í(Öt HÎN³Ì™›¬½É¯™\m¾/JG¤. ~·ºPj…N—šcnÓJç¬ÉU/ª¼]³@,şğ<X”¯ úØÌ_  Ó0³ï  €IDBEßÏæó+Â_–Š—Ïp¼^¯rŸ%¶…íºx¨*JÚ.ëT0È}ÀĞİâT– ‰ú¿-d ‹éÿ,  ’0  ĞÅB°+´_´­$_òİ' €ÏÀQwÿ  oàŠlÀõúzÉèè¶ûzpŸßíç•`ÖÌ-€Ê	§:¶×Ö¨Lò.µ]ÒKÑÌ`~ ğõ˜ õç:× á x^Ÿ´#àê Àˆ  æ¯; €H/ 5  9pÑçÔñîÉŒ{h¤Tv7ËmWİ¾Ïá$cÃùò¨Š€ í’x= pÇ=)"/c€vsT 8âöÓä EQ4Ogv pºbU  ô¸Å  à›¶     €à+pï_  ú— .šnN¨Ë7Ww“’b»¾‡ZUÊì^Ú¦²‡Z	q±dFEšx-@Á˜IÏÿ øş@}c  \Æ[€çbÜ% °ÙÇ Pjk U  &ÉÎ/ÿÂ{ÕâDäh˜û–×6‰>7ıêÕ ‚½™€€ùäò³¯tH €  AÑÔF   À @xøªÁî bÏ¾:  †· øŸÍ  ÖE ·¢t|é 80êm pÀcà×yêšv¿5H¥¾wZ5r2‹bÀŞib” ¦Xc¾ô2bˆı|ø~‚ÅŸ#ãÀıÁ' ØKäO ‹û
+ ¸:u €›¿  R/ €ID•ÔSªyìq´•]ÿ÷%²h® tJ‰§@ #3&»îh    €ÖuSbE¼â¥œ ©Nİ—  ĞhÖÎ÷,z¾X €¡ råõùh;J
+ @ˆˆæË*àL˜½ç\^	 ¼¾ € †é‹9rİûİÛûº×[ªÁ §ÚRlN¯eQxŠïR+F	xõ@¥—I—‡ÿ&¡xä`ß% ˜\'`t Àİ·s Àã $³ıÑX @¥` ¢³KÔœ^÷Z¿I\¬.Ü®w§MØ&ÌT2LÓ8òË?BÀïF 0  ²õ¿¬«*` §/Â €©¼-   ú" €½<¾»?€^?àx p ĞÒ £›=  €«€p­–f§Ó¬‡ù3ü ¾§ZÊ‘^|0¹dÖ©šÄL* ØÓÊŒ£1êúóÕä · ØËIœ†÷¿)Ğh÷ñ  ¨Kù ³9n 0 ˜D”S}/Ï.í+•£Ìö_Ë°PT3¦î"#ƒq×ğ±Ú¼€"= €ËH 9ôf  @d—«V x”j  ÀÄÇÊcñ<  À¢>$Í_ê  
+&€[¶À?Ø İĞâ”[¯#—òDBŞF‹¾§:ä$®R¨ôiİ©¶;¥«J	v;Œ­ä9üş<—ù  –ÿrÁ¢ €«Ó P æÇ @Ì´ó 1 q"ê¯Î¬õÍÙeÿŸhN’É‹W×ò *‚÷Ó÷- ¤ğı^tğ»Š Ğºtäî	  € Ìù[u©{$‚ ¼ü   XqÕ—Ÿİ2Ö²± SCßïl  À°É»«Ñ–Ò €«Ä  `2  Ô 2£C˜åøçN‰ÜÈ¾§Ú6Æ!ª4z¨Í¥'¥I´Ô Tğuwı~`€¶F# ËŸ €æïç (}1€0‰¨Ÿ	dw?{¯PôM[¶IŸ°'Kº¹åúÕów¡—¹V @FúØ26a¯º1P6Ì|ƒıÔô$À   #0O™×“ ã¶ã.
+ ˆÜìÿ  ±ÅÇŸ dY>PÁÌë\À”˜ª  À‘[@ênÏº•Ñc:óMsræÀ9î=Ş—:pJ$“­}—Z5¬!°¿› Œq°ïÇdW˜š€}kĞJ ¸ï  xÍï hşº H.Ü€™q  'FùØ=Y®Œü0»ÒÍjï_DdšµUdÏ‹>.’÷QùÿÃlzñÀ°B İïxaÏ! xò\ve°+UP °¤Ş¸ö§ü  Õ
+ùx
+Šhìß~   †£  Êµx$ó¦Ùs eØ\4  (Ó*Ò­êÚ *¨]›ƒãxÚÆAwfê£ÀD °½Œƒ©]¹ªÏCSÀ –s6ˆşh7  ô×¾=  X|· ¸ÙÿÎ Ğì^½ @@œå•l¿Õâ~÷FÔ‘²ÊÀç~UDT VÍÚoI`¼Ëe£,~	 # 1ş¥<oË   –ì./îã[ ÔÑC¿% $¨m†   Ÿë‚·­§ó#­7D€”wå‹*EÒO“‰³ ×µ vêb   »–  ˜0qG×M0(m¡>âfÊ ş‡ÚRòbfš§¿¡.8`:lÿ¦ ½®ÑÁz~á¼ Øã	 b?ìùól pŸ4  ¸Ëë `óo Pê6@Ä‰#ô“¥KÃn!‘‹;–Ñ¦qã,*ğ^v_.ËôÙ @$òİG0RdTCÉ#  ´Ôó¢xûÛğ  Ì#òïb0 Æ÷UP T:Bş}  x}0  ©@¹¡ßÍ^&>Ô~¹Ì€    §©  0 f
+Hƒ[ªÍU‡L×ŞwÚFòh^ÆCB7½nJ€Öid8ÜÏ­·êÀµ€¸·œ €]~  Ô‹ò>  Óì? °øÌ¾n  '"UT²‡—Ì_î¡¾…oóïÒu­(BBêm	€ÂYÖUY;r{„6  `Ë'ñª1     [äº˜ZæÇÆ 8hİMÅ:6 P£  @ó¹/ª¶ôĞ®Êo«[ş•pûı¦Ì€±—É"–üìï¶   êM%  @HˆØùwŞÚígVzWãmˆZQÚ¡¥±ÂÔB”M ôoßÓãÄi Ğ<X÷ €îµ/o  `®âr  ›ÿØ  Åg^§ €8‚¨Psñ¢•Ù¦™"wÖóiâÀ3Ò=ÜÙ3Å9¯ş¾MÍ/£ ce÷zUAre¡§•€*   _‰§ l   ¨¶~~ àãş¨€( À(  ¿İtAuÌ	Šr`¿æÊ‰[]äÅ›­       PIÇİ¸Hoagı¡IƒˆÚÊd^Z²Ây¨C¥‚¹0Q™Ó8lŞ4»Æìµ ü÷30>wW· –³¯ p—ö  ô`Æe  q‘t`ÀêÎœø»2Ì…¿O_‰mXÅÄ÷{  T‡kYÒ°¹š¦ÍÊÓ³Aáåï¨€(ÑÅ’™  ¢ú]Ü  pÒ#   ]©æÁşÛ,zŸŸ× ¸—÷ ”øà'@™s)ùL¾
+à ï¸X´:õ   ÀGç†ƒ¹Éyğ?OggS  €÷      @b“l   ï¹Êº¿ÆÅÉÌÊË¿½³·¨´«½wn‹†²¬§şgÚ6Ú”®	öL‡SsÉ@ Ò İwë€ñÌ™]À“À{8>×  ß¢üä = zöÑ¹  Íz< À…   y[“éÔåóÄ¼€Êüx¾8Ë‚×›¶)¹¸2ƒ
+ˆ÷¾@ œ—¥»§µ®Ã   ù¼¾ù   9sb,ó³rlÀ%H  Àz¿§   ä=  hä£g~¾  XCßAS¤ıL 8Àá §Ç½onâéË^ˆš2»‹×¢xLOM!Íá ²Ì&¸ »Òß’fÊ{¯}«@^`GÍ ¯ó	   p °Ùïy ”H @‚H½³¾‚eM'Á.l~rOƒ§}èçQv|Íş´d%y }:¸o Á€@ç¯eX°¾Ü	€   ÿ1é3      XËõ`^@ ÑQ ÊşÆ €ıù   €\6ÿÀpTv2    îcÿu††a ŞgÚ&wmNâ+qït`”*&(Üš€bÔ?m,{ï­^íàZì×nhÏ= À ğ-n…  Õ833>  @±¼®µòÑ¤0+ú.:"Ù²qYû1ÉsÍÌ›·÷0 $ç¿å2#ÔªÓƒÑÓ‚Ø  ‚î‚õ—/d@`  	ÖNZ'ê $Ó_æÖµ ¥]  8|	 „q iœ[ S  Ş¿şg  (Q  €ãœ³fLşì“>ç~wº(8Ik'¡İ}§Í a(Dš  |°N‚½ÿèõ{«@T 'x¿  î—éı   ]îc  ,İT|&®  @‚(ŸRhìM4ïIßë è‚¹08øˆz“ø¨=oQ“YÈHÄ£²AÙ:~I²    `üIŞûKm—  vp88`QA •¨÷+ƒ1`åñM¯gÃm   ¦*ë `y‡›ƒ»> ´ €  „’   Ï<‰ZIÖ¾—:lFi¡ò4¢¶=“D&Ï–&
+ª@ü£&‡©¸ˆ Äræ–ş®pŸ  puk  ›= €â© 1"
+~s÷‹5ï!•ÛÃ…ÄÀ4˜”g³^Nï.Z¤Ü “E;ÂèÅèx™Ç·¯{    pı|Ù¢ÙïÎ‹€‚€7Ì· KDx½   PĞ~›7?©BæÃ-·ÕšxÓÖëøÿ  €¡03    ”ŠlL†»ÛÓ^¤K¾wºRšÂw©Ç@ÇÒ80ş}yOXÏc+=€şY ÀéoåÕÄùƒf   =/í# À.İ €˜ÍË ¤Ş'  %‘vE>‡‡éğ×Ãª5cH£ŒOÅ‚ ¢Êxz ƒá\{„²öŸoCÀœ®ã€  ^o__DQQnä¿¢  ¢"Wß  pı4  €&  ¤ßâ(¢9¿‡-€ec¸œ9nzàÔ!`+.¢BÔÀàPÀ×Ê­zªÏ\mˆÚvZ× ÒÙâÁÓ1:@³p^Ø8píÇ	Öv|ù; ¼úœùLÿ @×®ûgß  ·[ 5€Í]. 4èYÿ% ˜‰{ @Ä y1|¡·ÏÕ0{«¤—sõ'©öXè´3_ £ê”0Å`	 ÀåJš±V:   š†~ÿh˜p¿Š* Àè¥Ï5 s/ÈHÀ×@é“  €¬÷  `õŸõé6(@»}.x¬M;¸  €´ß8:º”  #5>wº)ÅÕ;L£ƒ§mgÌi’HoE XWısÓãoÓ³ @ €Ø¯;È˜k x>·   —»  nî×Ó Ò™ø>­ 5 @Ä ‚Èÿˆzà"rAÓ—Ckê,~e]VÑ»«yç‚§ ŠjÓXFˆ€xõÛvXú|a   €_KWP   @€±CØ(˜À­  ¼Ä;  ô%ÆP©ŠÉ=  ğÍh+  €¿ I’DZùò}0  ïGçT  à®ú@¸>¨š
+­*¯%°Œ×˜º4nW¥è<t4!@ÃñÅËF‡õé•Èwl ¸İÀ î‘  ¾Ûi   6{{o ÀÍúå ˜ÉO €ˆğüV1ZqWæÉîØõâ]Ù¿µ&v½¼œn`q^ paÌN5DŸC   +Íµ    °Ì{\ıÓHDñ~k  »> Ş ”
+  sv   9€¬6ş‰ŒÉÀ  éà G1    ª¥X ^˜š0»ã°È™ÎzˆÚÚÔ
+Vø²¦	(0mÿ|%0NİÊ`¯ Œ‘L°‹Û ¸t; ÜìõÅ šİó ˜‰k € ²¬~ıÖÒïÿ¦$•Mo¶õWŸ¨D‡OÚeÔ©ÔüZ<€d²a.À|ş42   2óÃ¬İÕ €%Ñ¨]E @ïú¼-Ñ‚|nd €<>    ŸÏ7iáP¢•jß±ÿtp/ ì8Ò
+’  ®æ†#Ş§:8fÊ‰°âYU‡c8<r+ÜÖ& °ÿãú	¦uC5 ˆ0*H ¾ À;\õ Àf½ ¤3 H  % @;ÕnYY¡~‰¤NU®v\7x´Ÿ¦¥‡‰®] ôsqxg0‰ìæ\÷
+    Íøš*u‘     À'÷W&FG¤£"‚¨ä#Æ²LI%  `ï¤   *r  ß“Š8L£„¦±õµA ¶7LZ >˜:ä)†‰É~¦¥/91™ªN?·Às¤  _& ˜Ş± Ğ{X\V: PZ fó= Ä Ä ‚ ÚÖ<!ÜĞ5¨R<z—‘¬üâ P•åúd ùìgtv}0Ä]  h´ğß÷1£-  èİµğ øÿæÒ¡&–0@Ã
+  @nº¬+ XòÖÇ¾òkØ×¡¤¯ssùîÁ,Àµº®  PV  (8À¡¸:H,\°Î—¨ºP*›èŒ.6  íŞhaİwª	@&`	Ân `Ÿ ¸Ç­€àfÿ  13~ b b Ø&ÔË´¸ï	I,¦ÅYïï{À]ok{qŸGUwƒ+§ î¬Ãn ÀŞqÂ°©õú   ìG¥Õ  °\ökN EÉ?L0 `€4Ø2 `œ‡   ¢léí=ÿÜS‘
+Êı«C …   J‚  @~¨º‘(ˆ ‘úZs¨:Ü)hZM`4Æ¾~0 –ÿÉº¿; ”íĞ Q¸™ïk 0{êm @çS±‘úêOİÑ¤×Ï;WW
+çì
+åøçÏ†õi# °ÏËÚ•cƒ‘¬‘Ù€@†ü  ×Â/­	©–cê#jK„m¤©„–€ÇB Íù¦›úÉHØ>
+˜£]ô   PŒ  >ˆ:ä §™ÎÓ¼x:(İ‡Ìüù$ÚÄõ8ıö¾ây¦~ õ €ûõ­ƒµ'`ùS Ğ>³ïÏ  0ãËL ˆˆ–9XñòoâíûYÆ?/ÛÛ?ì>	šÏpÒöU‰  qóW€e]÷^”G´¿aPXûl  €ïÑ ¼;7XÉöò      `?  ìoë£  ÀóÌ ­ëŞ   $  pğ^ˆÚ²£[wÕŸZU©wñ‰[h¸	 øïÙÁ~Ræ rv €ër]ñ¹½ô °™ó @¤@@ Ù£ñÔ«Ntıä&×¶´·şºj$I]:˜*¶èÛ€Êï  €¡¬>#³ôË Ü5   Ø a–L`# àÿqU     à¡  À®ÿ½e   €à¢^	˜iÃ„  *  ` 
+v¨š~I3“§xP-µqµj¬Út¯×DcºG³	ì=¶í€<ÿ÷V`îã r€]Ôª î Hf= ¤ßš@j €ˆeÔöiÎ{>vŒy‚J:ŒëĞŸÊÜ®à¿U:MH t:t9(*µ{«'¿ª   b.iëĞ%  }	  ÉªöÀ @bã,[„ €8  BøR­­Ÿ¾×ë€Ò·- €æ àuÀ©éµ  P\œ-ØGËæË€|Áµ·:Ø%€6£ îš Ü€<8 @ ¬cRËKüY»huï™şÄÉ|uä)è}ÿó  BØW  ´şÍ  ¸ 	 o   ]     xÀ7Àu    Î`$/Lëä•;äuÆWüÊ£8 êænç
+ Ô± Ì$ 	  „myP^9¯¼Ú`«„¸ó®ÜàŸ4 hh$2  ÔÙ~	„…ÁÁ^c   ¾v  õök	 ÀÀÍ-   p«œ‚]¤°“9 Wæ]>®D°ƒL@(g^SD
+ ƒcO  àj%ÕT7{^êö—L‡=üd‹Ã’ª€hYœ5} \bê”[DG)†¹nPH ĞŒ?íÆ9d+íÈì03Úmñ;¾È²‡–YÌ.²ìš™´Ó°L÷	  `†±   ã‚Êx+ì£m†UÎª# ®<ÉG¿ÂXî}SF œ¿î €)Ş  6Ş€@Ø- `ø%!.7÷©;
+Øo–æX£ÎÎOİˆªz:İµÚ¼
+(ªBñk Àáãz¶  ŠKÉ*£•‘¶IÆ»3   pÅ,   Húœg :ÈÚæÆ¥°èR^t²m6ešœ_MÀd¯óÏÚş‚{@¨Xàwê¿6L+#  H¯û¾  €8¥Z ’” b b ìıALWkù…ˆX¿ÙşºÃ1&'|"ªQBßñŞu  ^¸{u¦ÌŠÊw¿-Œ`Œ|öqÉĞş‘­DPlşÒ»id  ÌáËMd  (|Ë ,õÜkq ¿˜  @Z    ~È: ÖÅ‰T/À»d²†q™x±Ç8°ü­ q/Æ€h3- @~ú°˜^R€Rï fóS ¤ €CÿxTrtW@}{‰”MDh|oMË  hÇ)<ŞvÃ„‘1 €°|iznê <§û= ›ñø·  ”ÿ  àe   ×ÆÛyŸç¿‡?Ğ@¶‘ıqTàP0pøÀ,À¡
+    ~Ø: ÖlÈèIxYVaë‚4Ê#/­ir°=tñ Î X 2öì¢% 0  8÷lS	€Hm 1 1  y—_KÕî00#Ìı™*÷eÍ6’…}ÿ& €Ö§3  0åG[zÿ `†0xªö  €1 4<âĞÄ   óŠ  €goİ.Œ€¸¶B£12|  ø èdû   d%   OggS Z#     @b“l   õâhV¦¦£­uwˆ¥q‰l–rŒ{Šzf|oM‚rWy©¬mn6Ø:Ä¬ÉˆO,‹ÿäAÖ!†êŒ‰nõ¿¢	š ~,ú.Ó¬	 L`—õŞK/ıt ÄÌã  föŒ b b  é†î¾M.{õv#1ÛÕÎEª-%s0 ˜ûÑ!  ÈÛ¦ùÈ'/¶ Ê+m   Ø{>ûd @‰4t pŞ      PÂ°,üãñ.R, `pİ‰   è”D   Ø:,RlSó,u°µ-øÅÔ¼ĞWpN6Ú:ôšô{N<ÈØëG 	˜«n  & qqK  Ò¯R ˆ TŞÛ”Ñ¥º¾3ıšÁª  ^ëş‹ €GVò3Ñj>Xê '3   ÉĞ`Û °u¬ €ÄQ2(   j  `]Òık¿ß·ì·   †r]}YUŸ ÀÀ=À¹$µ   ¾è: Öœ¦6q¦[zèºh8ÍTfÎb­Æ ‡~ìó»{Lj 8³ ™ÏeıÈ ¤[ÀX` 3ÿ
+  iê—@@ H]ëçmüI¾xZQôFÉ!ë6 x·lP—áÍËeu‰@@Æ…   h† ÀH+“
+‹0, l¦»   úú  @³%yègzåìw   ĞqÀ ü²’   ’r   –ø:@
+Ë¥TªÔW×áëÀÈ¹¸øÕI˜¨qDô¨Ûç†œïûÜùŠˆ Üç €™«,€ô ØÌsv HÓ“@@J ÷Xø¼\xui—¬^üEÿ;º? -q ”óôörŞuGŠ†µXD   @RTÙ“  @XY! ×ø  ÈÜ¦l  @Ê)  D³jÇ¿Ç @Ÿ?ÎA îW l@K‰   $±Ä¶‰›Ä÷lôØTú^,…B Q PYS 6 æ ìŒ ¢~ @ @•ªªÅ[¯+½Ë°ï@läŞ~áÉ&•€÷µ   5  €3l  €³l   d/+    ^o€õp£“Z   $±Ä`äMb>|ÊñPù}¸òy ³‘€ÑL9 „©P“   €‰TÕ¡pÃgHŞåU#<¥Ğ›5UØÎé1—éÛ6Rç±Õ®ª
+ ˆSÿ6  8Ø™A  Ğ%Ğ–‚„„²ùï„[c$… `{1ÈŞt_ŠE   /ì,[¼r.õPx×f	HL&À¼¦ lŞ;  €ÈÀ¨µQN\í¯c,f¤ıƒ¦4öª*)ÕpÎLÛØf5rİR˜ĞWî†, ¹s°„A˜Àÿãú  d*ƒ€ @®”¦£ç<<Ótm}m9f*û¨Ğ   ²(ÛfÖáü2yÉ.+e‡ŸR^gØ»ì0Í4»úcŠP=  \@(jÊ9Õ¦z@’zx© ’ ˜ªò©”½ö-Şóëƒ,•ÿçY€8©i¤ ˜~m¬`B´!™"	  ‡	 s¶»  ¨œC  ÍzŸŸ’\O @–EJçÊ
+¡    šÕj¿¾ ¯ @2§   ±œğÙÄËiz6ñ0Ê9^Ì9L 6  c®, À”3 (  UjÃjĞàpQášÄ v‹("  	° Q"+0’  öGa  à  ÆC      o  o´¼$    1šäëˆ#¶çà¤óàrk&kªTË \tÀ»ğì3  bf2  ?  S¢|R£H9ğ°oÔ|m5HîX-)v¨ÓÃ¨<-@£©Ù±ÓµCI!Ô|æRÅ  @˜°  ˆ±¡‚  ]‰  °ù3²Æ#‡‰0ñ
+¶ƒR8)   ®n ,±øIóHfı¤½ ®”²Ö}ùU¯>¢U  • æ¯ ìL 5%  @ø  ¢DË:U-zÃ.mÅö›ÛÑ{¾0À°  @DÙ  P  @t  Öª  Ê+€,y @ G €k2	ÛöT¨<üb¢Ri&aÛFë…Ê+gäÿTÆ@*/{]ÊÊ •-0ÌÔ™   Mµ ¤³j' Hµ @¤  ¦ª_]|n^®ÒFlhbHúˆH˜~FÔ„¨*'#‡€$I€‚1 º“ŠÀB  {O²  ¬‰e  ÀÕ,‘0  Uõóá[¶½k<ˆÅ m–€ ¯œåïTÉ+§ô;€:
+Ì\ÈjE‚ğP€±'`ë× ÅŒ  R„o  »õ»©åÛåÑT¶rt5#"ÙqhD¡B¢&ÇV.‡(pa
+ïZ–À Àh  ÔÓ  ¬“ØFØ iıĞ3§Ñ¥i d	  ÂV$©hi>“¤°CËç³ ¥Â,‹5ƒ2€DW[   Ø6ÓY À–3 @YÖ € { ¨Ä”ç¸DŸX/³æA !:   ’r¹X13 Ì  <M+   Ç   Ş ôQ eY†  3ãø™: çÅŒßk8‰¨L™<¦aevã÷Ê‰¨LIš  ÕÓ;ˆ)'@ H5© 
+ b¦ˆª@j 1 F¸6¢wí'Íc¯—tœöy>IyFe&¥ìd„À‚˜ ØŠ©#G  ‚ƒ2   ¢‡   ÃĞ   sfgˆÃ ³””H  c€m
+$-ì¤s›´°SÌí&@ª½böÌ‹DT Use  nşJ& ¨Ø²  Aà`Bï‚4¶wW}m.1Z„m;Z8Ú Äñ–$À6éKMT  Ğ9gs®‘Î9ëGD¯ºˆ¶A!H¤”Š.³\ àjM>L4­œ†qnZ9ã\`{¤F¢ ‘BÖv€©UBDFy @êD{Õ(J.;ÇQŠ´rT–â(¬ŒóVd¡Â€HTb$FBˆƒ8™° (³4˜“(Å;)f©B^(b¶º˜ËÅLæX–ÎÅÔŒ2
+  À„fÊ]a&  òØZ¥ò(ñ§y™oÏbkó£ø4'ó-ÃÈ,­4@î	@¨< € –> Èæ+ € ¨á×œÃå‹¥«„  a   ÃŒ*B  0& êMHŸº±–yÀ ø¸   AeÀ¨@
+   $¯ÄšµøxåÈ¬ÕÀ YB± V™ ›¢ €ğ @¨""ª˜~·M-¨Úµ¹#’°‹  €´	  ´zÈ–úXsuuf±²²ĞårYcŒ´sY’d t.' p¸Ò,    $§ÄZÎ\rJ¬åÌ] (£4é:
+°¶ YE%  d¨Z¬j˜V«36©LÔêH„Aœp:” hÂH   X   ÑÌè˜iÇr“<qÌŠItVÌb«+Sæb&s± 0– rÅ\,KÊËŠ  7±T%!ŸáãRIšZûåã·uş{Mš¦ÖxyûíCÃoTDÈ ¦g¢F ’™ª:   Ä‹!6iã&S7ÓH®Ç&
+ €bÛS   ñ`Ş%e
+  øĞNbç¨  È Üè@oœèŸØ«Í l#O$±¹âMë«$6W¼i}õ PRÅÊ   @	 dõP^  Ğ¬¢     ˆUÅáOÙb±      ¶†Íi  €   €ÿ  «,¥ÓRXfGKé´ïh€Zµ¨Vf&$ØCY  ¦(/  @Àd… ÇPˆ6
+ŠŠQ1DF   a6›   8B-~§CUEº\‹a¹lVYæQY¦´˜“BÌS‹E,g&„m$
+IÁPê P7s	X,ã3Ï¶_î? $¥-b¿œN¦ğ‹µi ”•$!  ÊLQA9 € TPCbqØ   Í°º \  IfÌd9½sd,‡Æí˜ËEçÊÒhWV‡9ÚÔJ»Xf&Ìôp(ÙJ)^ œŠ§‰¾ò™"zøì‘°vRYÂ«°ìgÈQ‹*KxÕ–ı%j	j*,@HS] € D"XÈ±çÂ¥ÍjˆH)
+SQ   ÿ÷w¸sÀì³÷A  ]ÎÕ
+‘‰1u?n]¬ûk\¥^zW©—^Ç eÅ"È$¢¨3ê4åZ)  0TÁ0,XN»Åé0m(9¡6Ï{¸‰aZMCÈfóÜJ9Fk1Òå²c±È\Y¢4O
+	1F´ˆ¶H¢ßò­Í.WÿúùòÈó®ê5f %®ô%ï(q¥/9ÁÄäa' 48€>o’A˜Œ“aœJ#%kÅQ”MGJv'KÍŸæ+Ÿ•"ĞÄ¯wã÷ï.–.µ[§“^Ã]8™<cvŠÁNrJ*(ÍB±à´0v’¥Iê$]t9î×¥±\L+«2K+«#sTæ¨hfÈr±Ì2cÊL««cwvS8Ú1µÏÌk…ÇA-)>tĞÔo}ÓªÁwZ÷º“~ø•-	ê\÷ÖÅÎ¿E· Œ$)"â¤"Š«­™ÙQg—ï/¯çg€b–Š“y2 y§.»ÒuIG2ÈÜèø*„f™Ì±<¬*2Çr\Ñì½÷¶«îÅP³7‰ç‘3‘~Ù»ÌŞ{ï}ï/ÊOW}­ºĞ:{WfLÜ>Ç!ï¤jòí?Ë¯’4õ'Uvô}cl¹‹şª5Ğ/”IÙ9Ä›Şih;pçú¬‰˜¤‰Çú,‹§H
+€D$‰H)21°78)³ïâ’Ú¹Ù·ÿæÖüß¿k–åÑÕì–i‰½ÎtöLê }öÌµ[vIUu×uÕwG\,BAßÇRöÇírÜZ whÓ•XŞtß÷ú¬ˆ§y¯Ïªˆ±¶D  “Šˆ8­Më«:¼×·T2¶ÓCi÷šş´µH‹gkş3á}îÚ[4_Àw£îÒQIh£Â'ôgŸ6ŸM#	ŒîÕ:ŸùGÒTZQ•~DéèşDèÿâÈ= çùl Bç³I€  €@  ‚ˆ) (ÀŞp¹˜½½÷Ö®Ø`÷°÷¿ÁG<Á|ìOggS         óBÍ_    “Aïšvorbis    À]      ÀW     ©OggS          óBÍ_   ¼ã;ÿÿÿÿÿÿÿÿÿÿÿÿ¢vorbis+   Xiph.Org libVorbis I 20120203 (Omnipresent)    vorbis$BCV @  B*­c:È!Œ¢ BÊ)ÇBĞ!£$Cˆ:Æ5ÇcG¹dŠBÉĞU  @  ¤WPrI-çœs£WÌqè çœså gÌq	%çœs9ç’r1çœs£Wr)-çœsGŠq§çœs¤GŠq¨çœsm1·’rÎ9çœsæ ‡Rr®5çœs¤gr%çœsÆ gÌqë çœsŒ5·ÔrÎ9çœsÎ9çœsÎ9çœsŒ1çœsÎ9çœsn1çs®9çœsÎ9çsÎ9çœs 4d    ¡(Šâ(²
+ È  @qG‘K±ËÑ$Y      H†¤HŠ¥Xfi&z¢(š¢*«²iÊ²,Ë²ëº.²
+ H  PQÅpY d  `(Š£8äX’¥Y„†¬ €    PG±Mñ$Ïò<Ïó<Ïó<Ïó<Ïó<Ïó<Ïó<Y     ‚(dBCV @  !CR\
+BCBÎC©¥ƒà)…%cÒS¬A!|ï=÷Ş{ïĞU    a8ˆÇ$!„b'Dq¦ !„å$XÊyè$İƒB¸œ{Ë¹÷Ş{ 4d   À „B!„B)¤”RH)¦˜bŠ)ÇsÌ1Ç ƒ2è “N:É¤’N:Ê$£Rk)µSL±åc­µÖœs¯A)cŒ1ÆcŒ1ÆcŒ1Æ#Y €  dA!„RH)¦˜rÌ1ÇBCV €     ER$Gr$G’$É’,I“<Ë³<Ë³<MÔDMUÕUm×öm_ömßÕeßöeÛÕe]–eİµm]Ö]]×u]×u]×u]×u]×u]×ĞU € €ä8ä8äH¤H
+²
+   €£8ŠãHäX%Y’&i–gy–§yš¨‰²
+        €¢(Š£8$Y–¦i§z¢(šªªŠ¦©ªªjš¦iš¦iš¦iš¦iš¦iš¦iš¦iš¦iš¦iš¦iš¦i¡!«  	  ÇqGqÇq$G’$ 4d      CQEr,Ç’4K³<ËÓDÏô\Q6uSWm 4d          Çs<Çs<É“<Ës<Ç“<IÓ4MÓ4MÓ4MÓ4MÓ4MÓ4MÓ4MÓ4MÓ4MÓ4MÓ4MÓ4MÓ4MÓ4MBCV d  ˜´ÔbîE—Î9(-Ö`2Æ˜“–‹ÉBÊIÌ%SÈ-§Œ!C£ØBÇ1HbJ)d!h±ÅV:Ç ÖZkL©”Y D p$	p$	         8  X…†¬ â £iğ<x<ç8§ÁóàyEˆ¢ã8šÏƒçA!Ššç™"\ª[†mk'šP]¨*l¶         ÏóT®
+×…ìB–=ÏSU¨*\²Y        €'z®
+×…«B–!Ëç©.TªÙ†,        ÀEÛ†,C–!»eOm²Y†+C–        à‰¢mC–!ËeÈ®'Š¶Y†,C–áº    L(…†¬ ¢  Š"Išæy°,ÏEX–ç‰"4ÍMš&Š¦	ÏEU…¦‰¢ª     À  ÀM‰Å
+Y	 „ 8E’,Ë²4Íó<OaYšæy'Š¦©š°,Mó<ÏEÓ4MX–ç‰¢(š¦ªª*4ËóDQMSUUšæy¢hšªªª®Mó<Q4MUUU×…æy(š¦ªº®,ÏEÓTU×•e                     FĞIF•EØhÂ… Ğ@  `bL1f”’TJIRRRI%’Z*­eRZk-ÆŒJj­ÅXQ)­¥Ö2*-ÆÖZ&©ÅØZ+  ìÀ ìÀB(4d%  @¢”RŒ1F¥TŠ1çœ“R*Å˜sÎQJsÎ9)¥Š9ç„”RÆœsÎ9J)cÎ9!¥Ô9çœsRJ©sÎ9g)¥Ô9çœ³”RÊ˜sÎ	  *p  °Qds‚‘ BCV ©  Ç±,Oó<Q4MI’4MEQU]×’$MESTU×¥iš&Š¦©ª®KÓ4MMSU]—ªziªªëÊ2×EÓTU×•e         @  x‚ P«#œ² È   AH)…R
+!¥BJ)„  8  ˜P
+Y	 ¤  Æ0æœsJ‰bB)©´T!Ä„RRj­iŒ1¥¤ÔZÓcRi©µ¦Rç¤¤ÔZŒÍµÎAH©µ›“¦”’Rk1F)M)%¥ÖbŒRÚšRk1Æ¥ô9¥–b¬5J)¥Œ­ÅXk”RJ[‹±Ö  ÀlXá¤h,°Ğ• @  aŒRŒ1Æ„P1ÆsB¨cŒ9!dŒ1çœƒ2Æ˜sÎAcÌ9ç „Œ1Æ˜sBÆœcÌ9!„Î1æ„BçsB!cŒ9'  ¨À  ÀF‘Í	F‚
+Y	 „  Æ(ÅcÎA(¥RÊ9ƒPJJBAè„RRjsB¥¤ÒRóœsB(%¥Öšk!”RJJ­ÅÖd¡”RRj-Ææœ!”’Rk±5çD”–Z‹±9'c))µcŒÍ9KI¥¥kmÎ9§RJ­ÅXksÎ9URŠ)ÆZ›“RÚšZŒ1Ö¥”Rç–b«1× L  lœa%é¬p4¸Ğ• @n  aŒRŒ9çœsÎ9çœs”RÆœsB!„B%•Œ9ç„B!„RJsB!„B!¤”:ç„B¡„RJI)uB!„PJ)¥”’Rê„B¥”RJ)%¥B!„PJ)¥”RJJ)¥B¡”RJ)¥””RJ!„PJ)¥”RJ))¥”B¡”RJ)¥”RRJ)•PJ)¥”RJ)¥¤”RJ©”RJ)¥”RJI)¥”R)¥”RJ)¥”’RJ)¥RJ)¥”RJ)%¥”RJ¥”RJ)¥”RJJ)¥”R*¥”RJ)¥””RJ)¥TJ)¥”RJ))¥”RJ©”RJ)¥”RRJ)¥”R)¥”RJ)¥¤”RJ)¥”J)¥”RJ)  èÀ  ÀˆJ±ÓŒ+À…P¡!+€  Àé¤”RJ)¥”RI)¥”RJ)¥”R*	¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”R `t†`ô„t’Qe6špá(4d%   ÃcŒ9'!•˜j¬”rÎ9Ç £Sm5FJ9çœsRŠ©Æœƒçœƒ:
+­ÄT[ÁsÎA¡””bŒµçàZç ”’RK±ÅVco­sJI©µkÍ9!B)µÖbŒ½Ö„tTZ‹±Öœ{B¸VJj-Æs®=!\+…ØjÍ5÷ŞƒB¨ÔZ­µç{B!Th%¦\{¾ç „:·Vkî=÷„B[[©)·às>!„2ÖZ{>!„BbË±÷ „B!„¶æŞƒ>!„BsïÁ! Èp @\0’:Ë°ÒˆOÀ²
+ ˆ € 0  0Á  À
+ve–Vm7u’}ø„ØŒ¹”Š™œz¤†Z¬;´‚¼ ,4d% @ À0¡ƒ{dbÌAëBˆ1(-g
+¤”Ø1†bPZÆ˜BH1isŒ!¤ u:§rTRk)„Z¬9×ÖRŠ   	 0@P0 F:Ú  2BƒƒL x€ˆ
+ ¥]Bé"Èâ'n<qÃ	Ú@     @ à  ¡ "¢™™«°¸ÀÈĞØàèğø 	       ø  HH€ˆhfæ*,.02468:<>@BDF      @         OggS  €"      óBÍ_   Ä¦J»ÒêéØÙûçëèçßÓÓÓÅÂ®±ºìöíB»ƒàË÷4Ø­@P 
+\˜B\pñêã<0ûÛÔ*ÄÉùço=sÿº¶Œ”A°ëÖÛç•pz¢ ¦i…6Gáïw·üşT½ÛI×/?›òp’¤ójÂ¾<òv”Œz_ÍY³£ÛËÚ8“´$IìëGo³%}½½œ‡‡§«9Óëí÷ïÿWÛX!#1<ı½?â~—èŞ
+ìf½oû­ÌãïOıöª-uß}ìH¨ÏÏ_yØúå^­¾*-©íaëç/\3‰°×NrYQ ç—ğO0™ëëêß,<ñóåïá÷¿Ó§k©CÁñÛ_ièàõÿÌ°§ıÏÅÙÒRìH5­+íûô®7]“M6TåÖüù%IU‡ÇW×ïÏÃµ‡‡ÍúÁƒëÂä±­cëú•F••Iöõåe¼ùöí™^o¯Æ,µt‘½‡¹Æê% ?ç®_~v¾Éõû¨:»H~ú÷|<pĞİ~òÙõúÜjá>Ÿç–^sÎKUŸí¡•¶”µ·Ï[\¿Şd†`#G×ü`ñm¤IØÀô¨+~^UP€,ÍÀÅ  e²nqcœÕ
+ €Šç„¾ßyÌ\ßc€—ÛÖîög6©=¤ŠÎÿ·ãáµ}\¯xÚeÉ|½2ö?êxÎØk´xbòÙuáÜ<'¼øÙ\ü7gtÙûõRªŞ÷O¼_tÜöù.>Qx(8Ÿı=Iï¬7¸ø|¥ßë^LÉÎ«eTçóªc»mf¯4ç?8»Ïü¿><+¯ìÿólæİ£Ä=@ ©:ŸºœLNÒÏ×	ß¾O·l‚ü·û†Aõå‡>rğu“:‰ººÂáàã×ãÓÑül¯Û³¥©[óÑœIY5çQVØAÊ˜ºä5?KŸu4	xí³øÏay,AP 8
+ˆ¾hôşåg²Ûx.×l Xš¸¾œ±œXšÿ_&&t·¯ódïÜµ¸«yÿ~©ûw÷3xw‘=›V¨¡—çûq¢ôih‚÷—ÿ›øÿd§mu¥Í1Û¿qÿYn‹>ï¦qyñ-…½ãe«;dèÙÃÉ¯´z»Û-Z?AcuwÛÈ·¼ÍY¬=îg_Çë¼vŞ£¿ˆv0Û+“¾NñécÎ^ö·Dã»ÇµBô§]­ÖeŞX_±»_;FÕxÉÇçó&Óá:ü	T@q$ Àœç×Î1Íãˆèî3K*Äˆ1mÒêf][ê[9è_YÙ¿5Y)%_cEs[dŞİ­ül\M‘œtgÛn>¨âåk6ı¸:Ë‡B2—Åş<â­Ü¿ôàğ§-}ğXuŞôíh"_*'²ì0ü‚ŒJ‹~“ì©\6êí]¿ÓU×¤­{ÙÏ²AöÛÒÁ Á—´¿—d¦ŞnßŞµGÅ°	LBq›&?éÓ/ŞHŠı÷Ù³¿]5“ù÷¡›×{º–>û¹¶TÒJµy+Í `,#|”¤©iÌEF(<“C×‰—X¦óé?·ìÇéúÈšY©´”®½ÄPÒ˜H•“ôçÙ~Ç
+kÿûíPîÈ?ùå_«Õ\ÎßmpÀñÌ/
+²_âZãén®hÓ™}OûÛ_[2×ìßœ>R¼ÕñAuËÍÚöÛ–ÓDk§¼Äªş±Siêå—jg¿®®ç¢_U¡o$¨´Ş")TP‡`æf åm¥"	±H‡ÉeŠı%š’¬Qaç´¿`%²¬gwìÏÉºvµ7À=ş*,$H!¨ä×c”À` ö#®}wXB4kéFQ¶X•İµòÀ Š_S–·óR×·—7ì•ó¾×©"¿d$¿?[N;§%TúŸ±…?üõ7şnÿ¶h÷Yj}a-íÜÜ‹r{ñÛ‹±½>ÍÍm»¼jÛmû¾o—Ü^.ë†z\3"†À7ÿ… @À˜\NÎÄÛjÏwÒ-Vé,úVfíôãh÷êÙî_u/	ë©~!hïOg÷[òOE+~ß+{n¢ •÷*µÔ²`LMLê¦·Œ9†ÃÀñ“á„ád„:Ô©›GìÓÆTY,Oo{Ô$¾Ö¬>4›QéGU¾¬&Ş
+ä¸9¨_­@Aê¦1õg­o1>·Å3'vÎuÛÈ¿¢6àS²tk:“JYÃ¿Wwë¿Z¹ÚnªÖr´—áŒZÛ½0üt±ÊÊo3UÚøÌ?ßU†   |	¸§
+‰Wğ%·¯ˆhü/X1IéèjÔ£÷oYixÌÑáÑÂÀ±c,,°d2À±\ÌÅ¹øvÛ»¿ß4“Ÿ’z“¾Ír¡ÈCûĞ¶ï¿äö&,qÅÆŒp_Ò°”í^–ÆKİék²^_CJ›&.‡"ÒşH®á·™í(öUÌ±: xp„ ~ú«4Ø” „:}= ğœA£¡jzöKî1í·çŒ–Ó:µ Ás´>G•¨ÚpÊŞİsçŠŞçù¾Ë¬©ŞI›•dêıĞÆ½*¨7š­ø4Ñ|#Ù"Ñ7ˆótºÎ“7_¸N
+ÏZ ÏJW–|…‡/ßàŞy=´ŞHDŞÖã˜cşòòb†ót!=öÒ Å—ôİ[[ïí=&R
+§çõĞHäQ›¶Ï*dÃ|ZTXO!]#¬ŸÆÚÚz×”4gh¬ïf—"X—µ®&)°¾Æº$Kg×*î†É»JNfŸ€·ß»l~Úól @h43‰ •«g”=€dgÊ¥RZ{4ñÿrÿıîç¼­ÿ¾ş—ü9Ø¼\ı‰ïâ†!ª Uªo§­×ª¥_é¼™«ô1ğ/¾f4‚ãK,ÀB€ob˜ãqïÌ‰‰¹n˜cNvï}ƒuİ½5øúûöÜïÈËÃêĞ÷OÕ3y~ïHÕ¯é÷âj‰1ïvéëõ¢È‹(¸9&«˜pySàö¦½¥>»µucàX0ylÌ9ÇğÆ4æ˜cLc9`¬ã@ñõ·ğ/0 zó¸ê€úZZË¡€hí˜*TEy«ØûĞ‡h@©ğ>¬
+ iºòıüë§õ×y¡¿«ó§>Öµe{¡è÷;O6»q|E«î
+J@D&™ÀŞù¶Ğ‹÷jÙ]™==Ô4˜O5Ğ`jbrkeânöÜö9ĞÍçø¨3-#ëü¿éW66ßÁšu–`š™¾®~½Ş,	½¿;J!qó½îŞÜ,¡óŸ¼eĞƒyg5gà×3eæèşa·mg²VLÚa`9ÀÁvÓXqì3šJıPZ$PmxZ¿xôP
+  >ó˜š3§Æ,&ÚÂ(Ş$Ç¸åy÷qdrúuR.šÄ YS–3À!O¶jµg¾üÖå}]ã5KãÂõ	?^«÷©Á’‚  à-!$¤•|7¡y¸ÿƒÚ³pÓÛKùÍşvE%úä®µgeiD^Áp]sX3Ç˜ßÓ{Ó>æéd 8ëGêXÈ üë­ñ³÷ËÙü’j^òòºÅkPâï¼Õ¿#·üØç>kö¬µ¢ñ:r´±ƒÓêv_ ÒLY@–JXŒ|$ãà{Œïës¼‡9ş9‹¤©u ë–)(ªO ¶î@¶hí<ís=
+
+Ùd.. «´TœµÎGû5¿—¤Ÿöš^ÿ§_;¿+óéÏàü”‹Ÿ0	 ) úñÕ‹ıYøvx¼kéŞ?*Æ˜LÆó 0¸¿ú¾õß_‹£Iõï1¦iÎ%X.,«V õãƒ¦ï+­6ª@SƒåfËFW´àAgÎ¾ôHôs»Cv7E _\œÿ—!z¼é3[<³¬e÷PÚ$TĞ’àèsiÌ0¸8¯œ×˜£áX' Ãª	ãñ:  >éª5HXGRdÓUiĞ˜T 2oÇkçğ$ƒµJ™’qÄ”…Û~&ãÜşZçùZïx˜ujê<‡§â=…¢C=«Ü¨§S_»X¬Ü}^½Í½OÒë‰ñ¨ì;›fKS7¡Ş›æh°öÁ ¦ÜÒvglÛîÛ¶î··&&œêu¸5<»¢é»Ğb+¿ĞO-,ÍìIPú‘æ®ów—>í\³m­ûïOÔ=Dv·¦4	zÏ½fÔ,4ùaŠxé Nõ£ƒÁˆ‘£sÓcÓ0 ¾É²˜^®ˆu\§*ĞÔr `e`¸EÛZ ÎdD’)ÄfŸ‚éV¯IêÌÿ­”ÕZ-ŸUİßYäÊşü!@_x}»=|)>[ë…c6‡lLÏãÍ_ZTâ“ÏıÙóm·õTNLœ¨'ˆ!ğB„@ñ1Áœ09šŒ `¼†Ñ_$’²ßjò.-I¥M?Ò&ÜÅ§$Éü\Üz«ûM¤*ôI):Ü¬z=®×ærÒ5JW¦Õ­>g‹ÍJÍ‡Óå³cÂÉäÉ  ©ª,HZ ’‹¨Z¼crëã²Ó¸yçe±O£Êcô')Í˜–Ši(ä|4?Í»G÷ş{S6B{eåŒ¦\WsvßÛŠ‡©?^ş®şÎsãy)zÙQöº¦uÍ¿,ìx¶÷ÆÏÈxÎãìZ©.f˜½˜½˜Š4o$AÑÜt%v"~¶S²êıÎ×úZzç(úÍe8$×©ÍÃºŠÙ·³r 0œÃ)ÛÆmlnñÜ?ÄKëÈÁ”=<CĞ¢-0Ü
+.„0d^¹ò=âÌ”— 	`@2UØÇvÖ•’d•v¦µ@óÏ\v[3©ò&Ñ¹uuÎÏL›[úrœ­‡¾üuüY~åkÉQæõo¢h¾5Ú½*Rõz¾¤“)«ŠHìïV¤°qu}xü‹ /EÊ¬ÈìqÿäŞ›™ş½‹ÚÑ‡&kOÄ*‹‘ª·êºÑ˜ºãÎ`láªÂ©¶M×Û(•†Æ„.®˜Z²c³…‹c
+7Ù'XÛ7@+Á„Ó-<8°¾¸*$H G®´	4Z£Á”2+È–šIÆÇˆ—ãmô]©ğq)1ôV¯­ò8^ºêŸé·„½·yùyz
+Y¯Û³¯$ˆ<ÂÉ°ø#o‘VU$u¯ G*…ı’â“/³åE‡{“¿c›:ÒôŒÑ"qŸşî¾õe©»#=±ŞŸ1y_ç™Óİ('ŸijsNèí%ßŠ¾)E%¬K˜û:éFn¤Ò"İ&²OÀ¸ŠĞ€ÄT¤À€QxÃ\DVÊ$¦•bÄÈDÜé`vş|ãPJ7ÔS{ı>ø/½l+&ç£Æ]óm£åUvDõÜ+¿º6iî‰4ŠíNS³KÆ„öwG|E^Z	úÙ ¬¿äÇª›·6æ_º7=aú\âZv­ÃSŠ/išÛVQÌ×³'˜”øC¥W
+#Š¸iª”¥S­«ƒwYœË(.]íœªı…›=zá–ş­Òpû ^xª( Àa*#P €}ßúã%Æ'“ÉE¯V¶V1åJ1"%©¤®}Ÿw]i‘œıÓÃ³ÿ2Ì\R¼Vçªë8Ûú°—iÈ/Éë¶Wü‰WT"¦İ2#r9jL7b!*I×’Ê„’gºÿ(9MGImÕÌËx/¿JÃ½ú¨ñ÷OÒÊ=ı-Z¬V'òş‚twM7zÜ‰Uuø²ê¼DçmÇ’×
+n\« ‡!¨"›ÏŒtáNp²¯OggS ¡7      óBÍ_   s½²±¬±¯ª¢£ˆ/Şwª0p dQ˜ò$ ’L¼åyÚe¤?–Ç(å -%'³’DD½,Îo÷«ãÿ¢]<•7?Æ›g¿=ÛÒ¯¶?á1¹ífsë)AÈsSÓãÚ³§ímsı×zT|Ië#å.‘šÿ†J—‚”\ÌEİô£¢IøõÅWW(Pöı·ËX€ıVcîúOıæÊ!ú”váÃgG#õÍîËé¿÷ò²ß”·Oc´\Ÿ¨ú!1?·µÿÀå›à™v,Ş—Ò $ëP0`
+<ëÊİgOÜV6}ª÷¹sCèè`2Åd %%Ñ•››õ?í.ï<{x™ú¨;ÇÚ?´±zUşúˆ¶{ıå!¡•UÕx4¬Ë¬Wc:™şHÛåŸÌĞ¸jª×$’¿Íÿt{ñQR×LU˜[k³âyå³‘6æ³‘ìÅØÈ“7ûÿ»Şeè7€é°EtTœÄíVæÌ@`c2Òe0—¸ÿîçqñ ùŞ^Wò   êJ  À–]‹kŸĞ+†„R¦’&1fêuªıÿh³6L+?Å~TÍwzH]à×>N‘¿6}¬aÑ+ê-g’èÎs†¢’²tƒjù5/UQó¹÷AŠ[{f¦±uÃr|–}÷ßIBÒHZŞ?{ı¼·³~÷Ÿ}¹Ÿı§»3ïĞìÉ]NİEßrs+ÁÀÚ‡1 ±Ö&½V?ïx¶òÙj«¤dï;—~—’ ,º.¥``ºÆ‰g@@3IŠ#IRÒÁ¡©çqS¥^İöõ-¿+áçÿìL­ìËŸJW…Êı^`É^qùOÉuÏÈõœ¯Ñ4×~mfªq?ûŒÕúÈjıÕƒââ¼kWûÚân)ÂKO.›’÷ãà“ó×ê{\Oä½üºè%—,™Ø«1ETña”w“Ÿş ?ª0³/ıŸ„/è#x&¹:>§Ò„Ğ(ÕÀw­;FŒu2ñâör_ )£ÑZIâH2IÄ(¦HN2¿ä#œÌ+½´º¿“‰&Ùº·/¶½b‹OñœdóË-f-éÈ¨‰¸hWF£»#ïÀ†ŞWë©‘4ôªê<4 ğ‚0—•é­‹{yãïsş­¾ —Ûîğà–snÚhŞ¥öø¦WwÜè(N+IÉÅ(®*9å”v¦êÁ=Êêq«Œø3Ÿ´ÕqoÊº	¶’ H×­’ “ô aŒ† ˜–Š\I"¢®åi÷N–.ÖÛzêPñ3İ(õÿ·G‹5EíÍÿk+_º nĞn{—æ®4—ıî½¥½F¤êNPP¢ŞIZ6*µLåZ»‹¬4fUú#y™wïÈ{ı i‚Şõ™ì·4>5ÒÔVnÎä6‹º0f~gßİ6sùú&dHú$Šó:OÇÎÌ ÷&ŞìÿçÍÌd{Ş¾?*óM`, ~§2ÊÀA“ˆïTÎ8(‘ú©Áš“’´$FÄˆ²åõíêD¥¾•ÛDt8èâ›/ÖÌ„~c=Ğ\oşºïŸu|Å®[K~¡b‰wûßòÒÏ&yµ÷¾BCÓ¯˜§S¹ÎÎä ›•™Jrâ“µÇ¤÷“;ëwñEWí›¦iö[ê'I¤‡¹åÎ¶›¡MÙ€–;½ÖŒL{êë÷§‹/[ø¡É¥ü,½©bp½»¡§êR?ŠÊĞÀªŠÊPÂ?xİî‘KöLY2)É%Îûóœ÷ó·o‹,Îhï±Oº¦«_¸Î¥ç¾K'û
+…Oò /H»İåífïu™Ğï§dıÑjÅR¹Õåy¹´sD»{I›â3pX·~àF%kŠ¨(sb­$µí÷î
+àÜÛÒwv$¯)f[ÿ#·É%&ùßMFÙCj ~ÇZÊ’§u¬ul	*oC‚1"f‰ˆ™$é,ZM¾]­m”ò°¢% zU¦×÷¿¥õ-ùóÖUë¹F*‰Ü:Ó}f%?ÿàªòFÕó¶¢‹äöt¶İñŞKìËïìz÷âE%ÕU«R©~ì‘†íZ*¾'Óéb·0¥µ³wMşxÍë¾Lÿ>]§†@ğ¢4y}»İ»ğZş>ŒKëş0pçúH
+ K„¼ÖŸK †b «ˆˆ#ˆ™’Èãnûİ.z‹“‰JÕéM ğ’_?¼¤}âóƒdô8ÓñxL½“,Ğ€x± }3§¦ÓtÎ²“ç†ï^v~œ‹8pêÌÍŸÉzó½şØëÄvû1Õ~&Õ¾Ûš6h­Az÷X©;÷ÉíùÕ7úl‹ !OôÙ4@  @`   Ñìx½™½ß+x0{ïı_ñŞ{À{ ØOggS         aµ5G    xşïÚvorbis    À]      ÀW     ©OggS          aµ5G   Ó°A;ÿÿÿÿÿÿÿÿÿÿÿÿ¢vorbis+   Xiph.Org libVorbis I 20120203 (Omnipresent)    vorbis$BCV @  B*­c:È!Œ¢ BÊ)ÇBĞ!£$Cˆ:Æ5ÇcG¹dŠBÉĞU  @  ¤WPrI-çœs£WÌqè çœså gÌq	%çœs9ç’r1çœs£Wr)-çœsGŠq§çœs¤GŠq¨çœsm1·’rÎ9çœsæ ‡Rr®5çœs¤gr%çœsÆ gÌqë çœsŒ5·ÔrÎ9çœsÎ9çœsÎ9çœsŒ1çœsÎ9çœsn1çs®9çœsÎ9çsÎ9çœs 4d    ¡(Šâ(²
+ È  @qG‘K±ËÑ$Y      H†¤HŠ¥Xfi&z¢(š¢*«²iÊ²,Ë²ëº.²
+ H  PQÅpY d  `(Š£8äX’¥Y„†¬ €    PG±Mñ$Ïò<Ïó<Ïó<Ïó<Ïó<Ïó<Ïó<Y     ‚(dBCV @  !CR\
+BCBÎC©¥ƒà)…%cÒS¬A!|ï=÷Ş{ïĞU    a8ˆÇ$!„b'Dq¦ !„å$XÊyè$İƒB¸œ{Ë¹÷Ş{ 4d   À „B!„B)¤”RH)¦˜bŠ)ÇsÌ1Ç ƒ2è “N:É¤’N:Ê$£Rk)µSL±åc­µÖœs¯A)cŒ1ÆcŒ1ÆcŒ1Æ#Y €  dA!„RH)¦˜rÌ1ÇBCV €     ER$Gr$G’$É’,I“<Ë³<Ë³<MÔDMUÕUm×öm_ömßÕeßöeÛÕe]–eİµm]Ö]]×u]×u]×u]×u]×u]×ĞU € €ä8ä8äH¤H
+²
+   €£8ŠãHäX%Y’&i–gy–§yš¨‰²
+        €¢(Š£8$Y–¦i§z¢(šªªŠ¦©ªªjš¦iš¦iš¦iš¦iš¦iš¦iš¦iš¦iš¦iš¦iš¦i¡!«  	  ÇqGqÇq$G’$ 4d      CQEr,Ç’4K³<ËÓDÏô\Q6uSWm 4d          Çs<Çs<É“<Ës<Ç“<IÓ4MÓ4MÓ4MÓ4MÓ4MÓ4MÓ4MÓ4MÓ4MÓ4MÓ4MÓ4MÓ4MÓ4MBCV d  ˜´ÔbîE—Î9(-Ö`2Æ˜“–‹ÉBÊIÌ%SÈ-§Œ!C£ØBÇ1HbJ)d!h±ÅV:Ç ÖZkL©”Y D p$	p$	         8  X…†¬ â £iğ<x<ç8§ÁóàyEˆ¢ã8šÏƒçA!Ššç™"\ª[†mk'šP]¨*l¶         ÏóT®
+×…ìB–=ÏSU¨*\²Y        €'z®
+×…«B–!Ëç©.TªÙ†,        ÀEÛ†,C–!»eOm²Y†+C–        à‰¢mC–!ËeÈ®'Š¶Y†,C–áº    L(…†¬ ¢  Š"Išæy°,ÏEX–ç‰"4ÍMš&Š¦	ÏEU…¦‰¢ª     À  ÀM‰Å
+Y	 „ 8E’,Ë²4Íó<OaYšæy'Š¦©š°,Mó<ÏEÓ4MX–ç‰¢(š¦ªª*4ËóDQMSUUšæy¢hšªªª®Mó<Q4MUUU×…æy(š¦ªº®,ÏEÓTU×•e                     FĞIF•EØhÂ… Ğ@  `bL1f”’TJIRRRI%’Z*­eRZk-ÆŒJj­ÅXQ)­¥Ö2*-ÆÖZ&©ÅØZ+  ìÀ ìÀB(4d%  @¢”RŒ1F¥TŠ1çœ“R*Å˜sÎQJsÎ9)¥Š9ç„”RÆœsÎ9J)cÎ9!¥Ô9çœsRJ©sÎ9g)¥Ô9çœ³”RÊ˜sÎ	  *p  °Qds‚‘ BCV ©  Ç±,Oó<Q4MI’4MEQU]×’$MESTU×¥iš&Š¦©ª®KÓ4MMSU]—ªziªªëÊ2×EÓTU×•e         @  x‚ P«#œ² È   AH)…R
+!¥BJ)„  8  ˜P
+Y	 ¤  Æ0æœsJ‰bB)©´T!Ä„RRj­iŒ1¥¤ÔZÓcRi©µ¦Rç¤¤ÔZŒÍµÎAH©µ›“¦”’Rk1F)M)%¥ÖbŒRÚšRk1Æ¥ô9¥–b¬5J)¥Œ­ÅXk”RJ[‹±Ö  ÀlXá¤h,°Ğ• @  aŒRŒ1Æ„P1ÆsB¨cŒ9!dŒ1çœƒ2Æ˜sÎAcÌ9ç „Œ1Æ˜sBÆœcÌ9!„Î1æ„BçsB!cŒ9'  ¨À  ÀF‘Í	F‚
+Y	 „  Æ(ÅcÎA(¥RÊ9ƒPJJBAè„RRjsB¥¤ÒRóœsB(%¥Öšk!”RJJ­ÅÖd¡”RRj-Ææœ!”’Rk±5çD”–Z‹±9'c))µcŒÍ9KI¥¥kmÎ9§RJ­ÅXksÎ9URŠ)ÆZ›“RÚšZŒ1Ö¥”Rç–b«1× L  lœa%é¬p4¸Ğ• @n  aŒRŒ9çœsÎ9çœs”RÆœsB!„B%•Œ9ç„B!„RJsB!„B!¤”:ç„B¡„RJI)uB!„PJ)¥”’Rê„B¥”RJ)%¥B!„PJ)¥”RJJ)¥B¡”RJ)¥””RJ!„PJ)¥”RJ))¥”B¡”RJ)¥”RRJ)•PJ)¥”RJ)¥¤”RJ©”RJ)¥”RJI)¥”R)¥”RJ)¥”’RJ)¥RJ)¥”RJ)%¥”RJ¥”RJ)¥”RJJ)¥”R*¥”RJ)¥””RJ)¥TJ)¥”RJ))¥”RJ©”RJ)¥”RRJ)¥”R)¥”RJ)¥¤”RJ)¥”J)¥”RJ)  èÀ  ÀˆJ±ÓŒ+À…P¡!+€  Àé¤”RJ)¥”RI)¥”RJ)¥”R*	¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”R `t†`ô„t’Qe6špá(4d%   ÃcŒ9'!•˜j¬”rÎ9Ç £Sm5FJ9çœsRŠ©Æœƒçœƒ:
+­ÄT[ÁsÎA¡””bŒµçàZç ”’RK±ÅVco­sJI©µkÍ9!B)µÖbŒ½Ö„tTZ‹±Öœ{B¸VJj-Æs®=!\+…ØjÍ5÷ŞƒB¨ÔZ­µç{B!Th%¦\{¾ç „:·Vkî=÷„B[[©)·às>!„2ÖZ{>!„BbË±÷ „B!„¶æŞƒ>!„BsïÁ! Èp @\0’:Ë°ÒˆOÀ²
+ ˆ € 0  0Á  À
+ve–Vm7u’}ø„ØŒ¹”Š™œz¤†Z¬;´‚¼ ,4d% @ À0¡ƒ{dbÌAëBˆ1(-g
+¤”Ø1†bPZÆ˜BH1isŒ!¤ u:§rTRk)„Z¬9×ÖRŠ   	 0@P0 F:Ú  2BƒƒL x€ˆ
+ ¥]Bé"Èâ'n<qÃ	Ú@     @ à  ¡ "¢™™«°¸ÀÈĞØàèğø 	       ø  HH€ˆhfæ*,.02468:<>@BDF      @         OggS Ì      aµ5G   ‘é ‘äªÅÉ¹ì\µ89—-‚‰F3e™EeEÀŠ
+Ñ!ÊYIAij#)d‰‹E9²’’L1`+ÈF
+‹iš’$¤QY{H§æXX]d1ÒåÌĞ,V1§¤5F’$Ú¹\BÌ‹¥Kc(BZZS¨P–£²’Œ4uA(+)(æ©Çhe…$æQIN‹©M’‘¶ÆÊ"´Fêp‘6‡++VçXd ô´¹ğó«§Í…Ÿ‡\­šuT¸³É’©¢V!3B&Má	äË‡±ÆV*­D„b B’  ¨Xˆ²e	ˆY’—ç¡©XT–(]Z,ÌÕeF¢b±2,—Ë.V£‘‹E+””‚a¯šƒ…Hc^$à<Wœ’BŒ¡$¤Å4+‘MB^^†£d°“³$ô²6óbzY›y1­¢ÎZÕ )èP ÷@†Àtv’c@0" XŠŠ£ĞDiáD"íth§£(J¤”Šr˜J„iì(Bâ „0L(Nq˜pœ¶E±Ã(N‡’Š±DDˆIpZ(fÅ@(fiˆÄ¬Òc’ZYY‹Õ•¹X]YfÆÍLéXdvÑ† ê”–´0Ç¢–]œY ä²ÂÊÊsYaee‰Â…²›	,‚`èdB	9L*"(ÏC–Dy‘bÅ<UJSÛyªèÆ 
+i%£‹ÌÌ…dií¡Üi¥äD“&„H .æ°È°I²$Y,ÚÑÑÌ6Ë]º˜CgRZHb’Eq’D!+M"í¥Y4’Ù;D!'“Usf ä¨Âİt*üÑm‹ ƒ\{¢+DC”Òöâd€Cšå…<+Î0óL3&F1Å`<ššœù¼R™‹ã+Ç-Gá™‡Ñ³1£cy8i’*”RR^H&KŠ‰pˆ!
+?, OÒd¹¨4MÉ\¬®,ÇÌóp™äYD¡¼
++ö–ed;)J³,   OggS         ş6Ç"    $›Ÿvorbis    À]      ÀW     ©OggS          ş6Ç"   ù&UÜ;ÿÿÿÿÿÿÿÿÿÿÿÿ¢vorbis+   Xiph.Org libVorbis I 20120203 (Omnipresent)    vorbis$BCV @  B*­c:È!Œ¢ BÊ)ÇBĞ!£$Cˆ:Æ5ÇcG¹dŠBÉĞU  @  ¤WPrI-çœs£WÌqè çœså gÌq	%çœs9ç’r1çœs£Wr)-çœsGŠq§çœs¤GŠq¨çœsm1·’rÎ9çœsæ ‡Rr®5çœs¤gr%çœsÆ gÌqë çœsŒ5·ÔrÎ9çœsÎ9çœsÎ9çœsŒ1çœsÎ9çœsn1çs®9çœsÎ9çsÎ9çœs 4d    ¡(Šâ(²
+ È  @qG‘K±ËÑ$Y      H†¤HŠ¥Xfi&z¢(š¢*«²iÊ²,Ë²ëº.²
+ H  PQÅpY d  `(Š£8äX’¥Y„†¬ €    PG±Mñ$Ïò<Ïó<Ïó<Ïó<Ïó<Ïó<Ïó<Y     ‚(dBCV @  !CR\
+BCBÎC©¥ƒà)…%cÒS¬A!|ï=÷Ş{ïĞU    a8ˆÇ$!„b'Dq¦ !„å$XÊyè$İƒB¸œ{Ë¹÷Ş{ 4d   À „B!„B)¤”RH)¦˜bŠ)ÇsÌ1Ç ƒ2è “N:É¤’N:Ê$£Rk)µSL±åc­µÖœs¯A)cŒ1ÆcŒ1ÆcŒ1Æ#Y €  dA!„RH)¦˜rÌ1ÇBCV €     ER$Gr$G’$É’,I“<Ë³<Ë³<MÔDMUÕUm×öm_ömßÕeßöeÛÕe]–eİµm]Ö]]×u]×u]×u]×u]×u]×ĞU € €ä8ä8äH¤H
+²
+   €£8ŠãHäX%Y’&i–gy–§yš¨‰²
+        €¢(Š£8$Y–¦i§z¢(šªªŠ¦©ªªjš¦iš¦iš¦iš¦iš¦iš¦iš¦iš¦iš¦iš¦iš¦i¡!«  	  ÇqGqÇq$G’$ 4d      CQEr,Ç’4K³<ËÓDÏô\Q6uSWm 4d          Çs<Çs<É“<Ës<Ç“<IÓ4MÓ4MÓ4MÓ4MÓ4MÓ4MÓ4MÓ4MÓ4MÓ4MÓ4MÓ4MÓ4MÓ4MBCV d  ˜´ÔbîE—Î9(-Ö`2Æ˜“–‹ÉBÊIÌ%SÈ-§Œ!C£ØBÇ1HbJ)d!h±ÅV:Ç ÖZkL©”Y D p$	p$	         8  X…†¬ â £iğ<x<ç8§ÁóàyEˆ¢ã8šÏƒçA!Ššç™"\ª[†mk'šP]¨*l¶         ÏóT®
+×…ìB–=ÏSU¨*\²Y        €'z®
+×…«B–!Ëç©.TªÙ†,        ÀEÛ†,C–!»eOm²Y†+C–        à‰¢mC–!ËeÈ®'Š¶Y†,C–áº    L(…†¬ ¢  Š"Išæy°,ÏEX–ç‰"4ÍMš&Š¦	ÏEU…¦‰¢ª     À  ÀM‰Å
+Y	 „ 8E’,Ë²4Íó<OaYšæy'Š¦©š°,Mó<ÏEÓ4MX–ç‰¢(š¦ªª*4ËóDQMSUUšæy¢hšªªª®Mó<Q4MUUU×…æy(š¦ªº®,ÏEÓTU×•e                     FĞIF•EØhÂ… Ğ@  `bL1f”’TJIRRRI%’Z*­eRZk-ÆŒJj­ÅXQ)­¥Ö2*-ÆÖZ&©ÅØZ+  ìÀ ìÀB(4d%  @¢”RŒ1F¥TŠ1çœ“R*Å˜sÎQJsÎ9)¥Š9ç„”RÆœsÎ9J)cÎ9!¥Ô9çœsRJ©sÎ9g)¥Ô9çœ³”RÊ˜sÎ	  *p  °Qds‚‘ BCV ©  Ç±,Oó<Q4MI’4MEQU]×’$MESTU×¥iš&Š¦©ª®KÓ4MMSU]—ªziªªëÊ2×EÓTU×•e         @  x‚ P«#œ² È   AH)…R
+!¥BJ)„  8  ˜P
+Y	 ¤  Æ0æœsJ‰bB)©´T!Ä„RRj­iŒ1¥¤ÔZÓcRi©µ¦Rç¤¤ÔZŒÍµÎAH©µ›“¦”’Rk1F)M)%¥ÖbŒRÚšRk1Æ¥ô9¥–b¬5J)¥Œ­ÅXk”RJ[‹±Ö  ÀlXá¤h,°Ğ• @  aŒRŒ1Æ„P1ÆsB¨cŒ9!dŒ1çœƒ2Æ˜sÎAcÌ9ç „Œ1Æ˜sBÆœcÌ9!„Î1æ„BçsB!cŒ9'  ¨À  ÀF‘Í	F‚
+Y	 „  Æ(ÅcÎA(¥RÊ9ƒPJJBAè„RRjsB¥¤ÒRóœsB(%¥Öšk!”RJJ­ÅÖd¡”RRj-Ææœ!”’Rk±5çD”–Z‹±9'c))µcŒÍ9KI¥¥kmÎ9§RJ­ÅXksÎ9URŠ)ÆZ›“RÚšZŒ1Ö¥”Rç–b«1× L  lœa%é¬p4¸Ğ• @n  aŒRŒ9çœsÎ9çœs”RÆœsB!„B%•Œ9ç„B!„RJsB!„B!¤”:ç„B¡„RJI)uB!„PJ)¥”’Rê„B¥”RJ)%¥B!„PJ)¥”RJJ)¥B¡”RJ)¥””RJ!„PJ)¥”RJ))¥”B¡”RJ)¥”RRJ)•PJ)¥”RJ)¥¤”RJ©”RJ)¥”RJI)¥”R)¥”RJ)¥”’RJ)¥RJ)¥”RJ)%¥”RJ¥”RJ)¥”RJJ)¥”R*¥”RJ)¥””RJ)¥TJ)¥”RJ))¥”RJ©”RJ)¥”RRJ)¥”R)¥”RJ)¥¤”RJ)¥”J)¥”RJ)  èÀ  ÀˆJ±ÓŒ+À…P¡!+€  Àé¤”RJ)¥”RI)¥”RJ)¥”R*	¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”R `t†`ô„t’Qe6špá(4d%   ÃcŒ9'!•˜j¬”rÎ9Ç £Sm5FJ9çœsRŠ©Æœƒçœƒ:
+­ÄT[ÁsÎA¡””bŒµçàZç ”’RK±ÅVco­sJI©µkÍ9!B)µÖbŒ½Ö„tTZ‹±Öœ{B¸VJj-Æs®=!\+…ØjÍ5÷ŞƒB¨ÔZ­µç{B!Th%¦\{¾ç „:·Vkî=÷„B[[©)·às>!„2ÖZ{>!„BbË±÷ „B!„¶æŞƒ>!„BsïÁ! Èp @\0’:Ë°ÒˆOÀ²
+ ˆ € 0  0Á  À
+ve–Vm7u’}ø„ØŒ¹”Š™œz¤†Z¬;´‚¼ ,4d% @ À0¡ƒ{dbÌAëBˆ1(-g
+¤”Ø1†bPZÆ˜BH1isŒ!¤ u:§rTRk)„Z¬9×ÖRŠ   	 0@P0 F:Ú  2BƒƒL x€ˆ
+ ¥]Bé"Èâ'n<qÃ	Ú@     @ à  ¡ "¢™™«°¸ÀÈĞØàèğø 	       ø  HH€ˆhfæ*,.02468:<>@BDF      @         OggS K      ş6Ç"   ¹c³·-(OzR=afvaevNHKgXSfU`\ZZRVRQSMNQPKOLKGHDAED?F;äÜC¹wÅ   	šÖş•´sV ‚ ŸÖÍÉ«W…u ä¦ÿJ\q¹é¿W(0À ¢¨¬¬ˆˆŠ€  
+–±¢b” À À}z8"ğˆcÂÕÄĞJ’Åb1‚°›¼¼Hâ6 Æb »ÿúpÅvÿõáŠ*H  Q() ‹jMM) h3 YVkª%" ¨Z­V1†#„¨@t6 €-àJFÌå²Æb„c	YH‹y¤»%r,¦©C–Èru¹lÆb$Á¬ußr¿³ ˜Ë)¡sÎHIIYIY&  LÉÿçÊ›)ù¿ã\y$P Dšo  À YQ$4  d):ÚS±Q   0
+(ÀTö³omRTLBZ‚ƒ" V:Ó( FÀIRL DÅÿ¿?ÅÿÊ¯ÀÇ `Œæk	  4’›N(   f¶( Y È<~  º;Ïœ À¡€“é  ÁÿÆs¯ã÷¿{¬ÀD®œ××½ €¢ €}ÍşßÌ   €Û„#zÍCÚÉûÆL‡x"„Öç  (Ä}¡m>dm    @;Ï¿ ğ[Ï  `c´t}½u  üÀÿİÓ¿±ÿw89hÒ æº' !Š |¾«×  €8¡ÀÔd¦–Ë[L.Êº!ùÙëcí'ÅÈ\U   AHŞ„iÎì¤
+    púhö ¼¥ ç ´¾Í  ºYü\±Ûâ}_Ú$~®Œømá"¾Ü H”EF pŸùò!Ï   h$ € MeOc  @M%^†H@ p» Ô~îĞ~=¡!ñ1*hi‚õj 7Oåß6ÀL® ø¸y   @uRV­µ zü\±[øsyœw†?Eäõçğ8o€â4  éuQa €º€™   ¸ô“ì•x    XšÍdÂp Ô¾QÏ²|g¬ÚŒ° @àv  é8š£ ¾üÜ^$o)+ƒŸk#~Mîóøä„r4* Àt¼È+    è·    ñ¦Ï×ûN»‘   X~£Ù` _ ¦¦ ü[•‡Am ¶Ï7 0×¼ÏÂ`ìÀ À×G 6ü\ñ[úD|x$ø¹8b·Ô?òøğ&@ÂY4T ÀöuQ<¼   N ‰   çí¿³\ë,e € €¶Ú¿s´aÛ Àí/³RÀëÊö-(üÖµÀÃÅ,@é†ûËG'æõ5Bßp-    º»Ä` 4ÉÿÊ1æšäÿcÌ @¢ @ø2å¡  m€¬¬   Ø“ó¯iç    ß	a”{¡[#rÑ¬Ç0Ï`À8  =oÙ  ,ÁÿÊ¯À×4ÁÿöĞ<‚ E @äïAóó	  èÀB  g.İ°     ·¹‰B0O¤ÕtyäJš G Pç  ÁÿÆs¯£÷_yfğ \ ¢ €¼šÕª €¦!¨\:ÍİP÷÷ş  ¤Ğ¢x&	    ?²Ö[Ö@   üêÑ™¢ğÈ ’·ûlŒäõ¾-¢dø¹EÄï7<ş>	€$0  ìûÅ•œ    @ zÇÿáÎ€  Pëxu-½¼«Æ    Ğ¬¾¤ë ğÂ½…Ë/€¢- â´u“ $à ğ| ÁÿÊ­Àc0üß=\9 H ( 0õ?Eß±   L •,ºAyvÏ3¨iµ  P”gû€Ñ´A   PYïS  è†Õzõ3ªû^ 8)€wz $ÃÿÊ¯ÀÇÇğ¿ò+ğ€!¢  ß›r-   À	  ‘#÷Ë¿ÈD    :âA€%ã«3SùJ¥«­4p´P  Ä Ryt Éû¬øm~ŸÇ§“¼Ïêˆßfñé P"È@L2óÿ¾ºÈ    Àt°8  €8Ëšîó~;    ×e‰ÙÎ8™5ğU Wàö6 O/ éÓc¹eÆÀM    »}¬* —û\ÉkñV4R@rÈûÜ:’·pÃã¯i p
+àñ‹+   ¸	Â   €ñıÕĞÿ   Àt×¿Cl |)Àõ× „ƒ~÷ó±8 @Şèû\É«ø£ˆóíÄáçæH^Õ¶Dü^@Bh¨  ı8Së«"   øb€4  €Š¼~U’    êd P˜ù?¸¾À2ú¾ª ,7   àÿ Ş¸û\ñÛøsD|¸İ8ü\±Ûä>/5 B¡1  8<óğ:#  P` $   êiÑu6‡    £Öc.ç
+\* wQ ÂÉÔ<aÀ®ƒ @?¹ gû\ñ+r+¢Ñä@ÜçV‘¼©nxü} ¡Ñ]\Y    Ÿ8€Ä„dY†     ªÊ,a0¸ ¹@‘Ï*Àè¼vØ Î  €–3
+  ·½ >üÜÉ+¹ÅãçJàïsc$¯Ê-ßŸ04ÆÈ€Éefæ_5  €„   ©´ı   €{: ~Jà¤À|‰Y |ØÑ¤ W ¥  İ—-~ül–wÙ¶ˆ¿*‡ÀÏædy—lóø= †Æ€ ğ‹Ç   €“    )¿Ô×˜D   p d
+ĞgÁf ÒÜ   `
+7û\ñÛ¸Qhöís{‘¼nÛ<~¾ ¡ ĞÍüŞw  @_‚   €<qôù‘    €ìw™º5€û  > ŸÔçÇÚ-` øÍ ·ûl”+¶-âËqîss$¯Êm_> ÙÌW=|   âô   P>f|¨ 7-V
+;áş?  ß@‚    &ü 9 €;>øûÜ"JŞe?ú>7GòÙñ}€`ä  <äâV   Â   WİOÿ)  ÀØH€×À¨ãÀ ¥+ `  ÒEQ 'û\ñ[¸Q(œy²ÏÕ¿%üALª@lŞ À8È€|4SóN   (°Â    ô–05   ”ö×ß#p  Ü" ¿u8  y¼gû\ñëÜŠ¨@d¢¼ÛçÊˆ_·[ˆ	 Äa@63kÖ  €„ /»    x§°X.€×ºGÜ  €~öË è Ş·ûÜÉÛØñe%O÷¹1â·±ÍãÓ# @ä €ú·"   (0	Â  À
+¥YıW@   ÀÈ‰0Q€`há ×bLà  €ÅDû¬ø-ÏˆŸÿwŞë³:â·È}1©qÑ . P ¿™ó  €“ L  ã   @Ê    GéKX øÅux  òxÊ'û\±›úVŒ¨@dpís!â·…ˆ, #@ ¸Î<šµ   À4@˜   €Õîs	    ĞuåŞ ¬…àeX€ À›C ‡û\ÉÛäFLª@ É»}®øz[D" ‚! 03×*   (°@˜    ºE^     ¤ àS ?V@¯  É ÷ú¬ø-÷ˆ¿ÿï<×gmÄo¹oEüÿó Ã€˜™ó  €G€0    Šs     ‹°sLÇÂ Şƒ÷Ğñëæ€ì d}Çú¬ømmKÄ—ÿ;ÏõY±›y+¢1È €` È ×T  Ø&H   €q¥Ã¾    0ùfü² ¬ €Úvn €< Wû\ñ[äFLª@T’<ÚçâˆßäFLª@ @0 ›¹V  @Â„6D     §2Ğ € ôà   xö,  £ë( çú¬ŒømíFDeú/óZŸ•¿¥Ü‰¨@
+h @P 3S3O   È@    Ô<öZ‚    / p/  ¥3m¬- GVwú,Øõµ-âãÏWê³:â·œ·"¾üü  @|©  (0&    ëG«Ø    ´ıdğù `1¬  òí@0 Wû\±›ûFDâpæÅ>Eìæ¾Q8d  $P ¿Tï  €'   @ßë!Ç    (ÏÈ 8 P  ?çúlŒä-ï-ıÿóZŸÅ»yŞŠ¨@$Z  H0 ©	   CİE   €*¸  À;  Xr² / ˜'úC»6¶Eüşå>+#~ó¼iUÿ  	ä €g  À&     °î†ùÙ Ú 'mß  ` ÈC×ú¬ø-÷ˆ/?ï¼ÖguÄo¹·DT l  ¤ ( 1 €-&   €~ €<™¯
+ 0ÇâWåƒ  \ ºZ Çú¬ø-Ï¶ˆÿşóXŸµ¿å¹iÿ?  R ¤©  2Aå:B   ‘e
+ @~ ‚P:­²0àÂ ·ùS»VFˆ?ôG#v}="íûÿ  @   n  ¤ÛÌ   (î 9ÍvµÁŞh  À«  ÀsÛ– Gù¥¹â âü oòs»’^ÄùŸ   ğš¹\O       „ëûáJG   Û£ÇÖ“=€Ù OggS         0ıs0    POb–vorbis    D¬       w     ¸OggS          0ıs0   ¿ü|;ÿÿÿÿÿÿÿÿÿÿÿÿÿÿÉvorbis+   Xiph.Org libVorbis I 20120203 (Omnipresent)    vorbis)BCV    1L Å€ĞU    `$)“fI)¥”¡(y˜”HI)¥”Å0‰˜”‰ÅcŒ1ÆcŒ1ÆcŒ 4d   €(	£æIjÎ9g'r 9iN8§ ŠQà9	Âõ&cn¦´¦knÎ)%Y   @H!…RH!…bˆ!†bˆ!‡rÈ!§œr
+*¨ ‚
+2È ƒL2é¤“N:é¨£:ê(´ĞB-´ÒJL1ÕVc®½]|sÎ9çœsÎ9çœsÎ	BCV    BdB!…Rˆ)¦˜r
+2È€ĞU    €    G‘I±Ë±ÍÑ$Oò,Q5Ñ3ESTMUUUUu]Wve×vu×v}Y˜…[¸}Y¸…[Ø…]÷…a†a†a†aø}ß÷}ß÷} 4d    #9–ã)¢"¢â9¢„†¬ d    	’")’£I¦fj®i›¶h«¶mË²,Ë²„†¬         iš¦iš¦iš¦iš¦iš¦iš¦išfY–eY–eY–eY–eY–eY–eY–eY–eY–eY–eY–eY–eY@hÈ* @ @ÇqÇq$ER$Çr,Y È   @R,År4Gs4Çs<Çs<GtDÉ”LÍôLY        @1ÅqÉÑ$OR-Ór5Ws=×sM×u]WUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUĞU    !f–j€3a 4d €   ¡CY    ˆ¡ä šĞšóÍ9šå ©›ÓÁ‰T›'¹©˜›sÎ9çœlÎãœsÎ)Ê™Å ™ĞšsÎIš¥ ™ĞšsÎy›­©ÒšsÎçœÆaœsÎiÒš©ÙX›sÎYĞšæ¨¹›sÎ‰”›'µ¹T›sÎ9çœsÎ9çœsÎ©^œÎÁ9áœsÎ‰Ú›k¹	]œsÎùdœîÍ	áœsÎ9çœsÎ9çœsÎ	BCV @  aØÆ‚ }b!¦!“t“ 1È)¤FJ©ƒPR'¥t‚ĞU     „RH!…RH!…RH!†bˆ!§œr
+*¨¤’Š*Ê(³Ì2Ë,³Ì2Ë¬ÃÎ:ë°ÃC1´ÒJ,5ÕVcµæs®9Hk¥µÖZ+¥”RJ)¥ 4d   @ dA…RH!†˜rÊ)§ ‚
+Y      ğ$ÏÑÑÑÑÏñQ%Q%Ñ2-S3=UTUWvmY—uÛ·…]Øuß×}ß×_†eY–eY–eY–eY–eY–e	BCV     B!„RH!…”bŒ1ÇœƒNB	ĞU    €    GqÇ‘É‘$K²$MÒ,Íò4Oó4ÑEQ4MS]ÑuÓeS6]Ó5eÓUeÕveÙ¶e[·}Y¶}ß÷}ß÷}ß÷}ß÷}ß×u 4d    #9’")’"9ãH’„†¬ d    (â8#I’$Y’&y–g‰š©™é©¢
+„†¬         hŠ§˜Š§ˆŠçˆ(‰–i‰šª¹¢lÊ®ëº®ëº®ëº®ëº®ëº®ëº®ëº®ëº®ëº®ëº®ëº®ëº@hÈ* @ @Gr$Gr$ER$Er$Y È   À1CR$Ç²,Mó4Oó4Ñ=Ñ3=UtEY        ÀK±ÍÑ$QR-ÕR5ÕR-UT=UUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUÕ4MÓ4Ğ•    #A„ŠrBn=X1æ$¡9¡Ä„§39"tA'=¸’9ÃóàR(DLƒ%7 Â¦\Iå8BCV Q  €1È1ÄrÎIÉ DÎ1	”È9'¥“ÒI)-–3)%¦cãœ£ÒIÉ¤”KŠ¤c‰­  €  € ¡Ğ@  bR
+)…”RÎ)æRÊ1åRJ9§œSÎ9„Ê1ƒ)¥SÎ)Ç„ÌAåœƒĞA(   À  ÀB(4dE ' àp$Ï“4K%KEÏe×M×•4Í45QTUËUÕTUÛMU¶%MMMôTUEUUÓ–MUµmÏ4eÙTUİUÕ¶eÛ~W–uß3MYUÕÖMUµu×–}_Öm]˜4Í45QTUMUÕTUÛ6U×¶5QtUQUeYTUYveY÷UWÖ}KUÕSMÙUU¶UÙõmU–}átU]WeÙ÷UY~[×…áö}áUÕÖM×ÕuU–}aÖea·uß(išij¢¨ªš(ªª©ª¶mª®­[¢èª¢ªÊ²gª®¬Ê²¯«®lëš(ª®¨ª²,ªª,«²¬ûª,ë¶¨ªº­Ê²°›®«ë¶ïÃ,ëºpª®®«²ìûª,ëº­ëÆqëº0|¦)Ë¦«êº©ººnëºqÌ¶m£ªê¾*ËÂ°Ê²ïëº/´u!QUuİ”]ãWeY÷m_w[÷…²m;¿­ûÊqëºÒø9Ïo¹¶m³n¿­ûÆó+?a8¥gš¶mªª­›ª«ë²n+Ã¬ëBQU}]•eß7]Ynß7[×¢ªêº*Ë¾°Ê²1ÜÆo»0]Û6[×²­}cÈ÷	ÏkÛÆqû:ãöu£¯	Ç  € € Ê@¡!+€8 !çS*Å tRê ¤T1!sNJÅ”PJj!”Ô*Æ TIÈœ“Jh)”ÒR¡¥PJk¡”ÖRk±¦Ôbí ¤Ji-”ÒZj©ÆÔZŒc2ç¤dÎI	¥´Ji-sNJç ¤BJ¥¤KJ-VÌIÉ £ÒAH©¤SI©µPJk¥¤KJ1¶[n1ÖJi-¤[I)ÆSm-Æš#Æ dÎIÉœ“Ji-”ÒZå˜”BJ™ƒ’JJ­•’RÌœ“ÒAH©ƒJI)¶’JL¡”ÖJJ±…RZl1ÖœRl5”ÒZI)Æ’Jl-ÆZ[LµuZ¥´Ji­µVkj­ÆPJk%¥KJ±µkn1æJi­¤[I©Å[-ÆšSk5¦Öjn1æ[m=ÖšsJ­ÖÔR-Æšcm½Õš{ï ¤Ji-”Òbj-ÆÖb­¡”ÖJ*±•’Zl1æÚZŒ9”ÒbI©Å’RŒ-Æš[l¹¦–jl1æšR‹µæÚsl5öÔZ¬-ÆšSKµÖZs¹õV  À€ @€	e Ğ• @  AˆRÎIirÌ9*	BÌ9'©rLB))UÌA%µÎ9))ÅÖ9%¥K*-ÅVk))µk-   À  ÀM‰Å
+Y	 D  Æ Ä„¥ƒĞ¤c"¥sNJ¥cÎIÉsB*cÎA()„PJ*)…JI%¥  
+  lĞ”X Ğ@  `b1† tT2*„LJ'©Z­uÖRk¥ÅÌZj­´Ø@­…Ö2K%ÆÔZf­Ä˜Z+  ìÀ ìÀB(4d%  @£cÎ9gbÌ9è41æ„*ÆœƒBcÎA!„Ì9!„Bæ„B¡ƒB¥”ÒA!„RJé „B)¥tB¡”R
+  *p  °Qds‚‘ BCV y  €1J9¡”F)Æ ”’R£cJI©rB))ÅV9¡””Zì ”ÒZl5vJi-ÆZCJ­ÅXk®!¥Öb¬5×ÔZŒµæškJ-ÆZkÍ¹  Ü °E6'	*4d%  € ¤cŒ1†bŠ1çœC)Å˜sÎ)¦sÎ9ç”bŒ9çœsŒ1çœsÎ9Æ˜sÎ9çsÎ9çœs9çœsÎ9çœsÎ9çœsÎ9çœsÎ	  *p  °Qds‚‘ BCV ©   VbŒ1Æ1ÆcŒ1FbŒ1Æcl1ÆcŒ1Æ˜bŒ1ÆcŒ1ÆcŒ1ÆcŒ1ÆcŒ1ÆcŒ1ÆcŒ1ÆcŒ1ÆcŒ1ÆcŒ1ÆcŒ1Æ[k­µÖZk­µÖZk­µÖZk­ @¿
+ ÿVG8),4d%   Ã˜s9„†)è¤„B¡CJ9(%„PJ))sNJJ¥¤”ZJ™sRR*%¥–Rê ¤ÔZJ-µÖZ%¥ÖRj­µÖ:¥´ÔZk­µØAH)¥ÖZ‹-ÆPJJ­µØbŒ5†RRj­ÅØb¬1¤ÒRl-Æc¬¡”ÖZk1Æk-)µÖbŒµÆZkI©µÖb‹5ÖZ ànp €H°q†•¤³ÂÑàBCV ! BŒ9çœsB!RŠ1ç ƒB!DJ1ætB!„Œ1ç ƒB!„1ætB!„:ç„B¡„RJçtB!”PBé „B¡„RJ)„B(¡„RJ)%„B	¥”RJ)¥„B¡„J)¥”B¥”RJ)¥”B!”RJ)¥”RB¡”PJ)¥”RJ!„RJ)¥”RJ	!„PJ)¥”RJ)!„J)¥”RJ)¥  € € #è$£Ê"l4áÂPhÈJ €  qØjë)ÖÈ Åœ„–K„rb.RŠ9G±eHÅÕ”1¥SRkèœbŒQOcJ1Ã¬”VJ(‘‚Òr¬µvÌ    0!3@È €„)  °ÀĞ1\ä2
+
+Ç„sÒi „È‘ˆXª¢b: X\`È€´‹è2À]Üu „ !ˆÅ€ƒnxâO¸Á	:E¥        ’ ""š9‘’“”     à€ €$ˆˆˆf£Ãã$Dd„¤Ää%                 OggS 2      0ıs0   mrrS-()Š«™c‘§Ç×@qÍì~K  0(~™D2af:¶X½ï
+Îƒ.hñO¼llö‘,^w$OÈÛö¯àt?°„ZïıS¬Ëıìçı?DKØ0-¶s"B¼fI•àáéOƒ»òÖ<€³ Wƒ‹$Õm-L›«¬¿Z§¿<õKb{¸L ÚX]ÓÜæ¹øçõÀ>ã¸Oú?ß*çy6€*B·cº¿`
+€   GÃ\‘x½Og/ÿ¯ü·Ÿ>üàƒIFJ©Ş§İ§–âïæ@øqÖàşşßÿûû’’’ü×¿ÿ÷O”õÏĞ%%°¸Úß?ÑEŠÏ^2¼ÜÀ¤vÛ NÇÁu¯  g¼Ë6}²]o»<±FvfPEè€7Ÿÿ¨1„,Á  tåö÷0Ïƒ°æ¹×¾tÿÂÁg·ŸÜœöÖÃ5 +Ë}±oçV0;%í/şŸOä×èœV©vt¡K—.ıĞHäê]f&C†jØ—mlãC:äÌã8 ˜ccÆ(MÓ4Mc3l½w Õ!hm¾Ä	6	ù÷ó>Ámi  X¸OggS         üA©1    af ,vorbis    À]      ÀW     ©OggS          üA©1   8j¦;ÿÿÿÿÿÿÿÿÿÿÿÿ¢vorbis+   Xiph.Org libVorbis I 20120203 (Omnipresent)    vorbis$BCV @  B*­c:È!Œ¢ BÊ)ÇBĞ!£$Cˆ:Æ5ÇcG¹dŠBÉĞU  @  ¤WPrI-çœs£WÌqè çœså gÌq	%çœs9ç’r1çœs£Wr)-çœsGŠq§çœs¤GŠq¨çœsm1·’rÎ9çœsæ ‡Rr®5çœs¤gr%çœsÆ gÌqë çœsŒ5·ÔrÎ9çœsÎ9çœsÎ9çœsŒ1çœsÎ9çœsn1çs®9çœsÎ9çsÎ9çœs 4d    ¡(Šâ(²
+ È  @qG‘K±ËÑ$Y      H†¤HŠ¥Xfi&z¢(š¢*«²iÊ²,Ë²ëº.²
+ H  PQÅpY d  `(Š£8äX’¥Y„†¬ €    PG±Mñ$Ïò<Ïó<Ïó<Ïó<Ïó<Ïó<Ïó<Y     ‚(dBCV @  !CR\
+BCBÎC©¥ƒà)…%cÒS¬A!|ï=÷Ş{ïĞU    a8ˆÇ$!„b'Dq¦ !„å$XÊyè$İƒB¸œ{Ë¹÷Ş{ 4d   À „B!„B)¤”RH)¦˜bŠ)ÇsÌ1Ç ƒ2è “N:É¤’N:Ê$£Rk)µSL±åc­µÖœs¯A)cŒ1ÆcŒ1ÆcŒ1Æ#Y €  dA!„RH)¦˜rÌ1ÇBCV €     ER$Gr$G’$É’,I“<Ë³<Ë³<MÔDMUÕUm×öm_ömßÕeßöeÛÕe]–eİµm]Ö]]×u]×u]×u]×u]×u]×ĞU € €ä8ä8äH¤H
+²
+   €£8ŠãHäX%Y’&i–gy–§yš¨‰²
+        €¢(Š£8$Y–¦i§z¢(šªªŠ¦©ªªjš¦iš¦iš¦iš¦iš¦iš¦iš¦iš¦iš¦iš¦iš¦i¡!«  	  ÇqGqÇq$G’$ 4d      CQEr,Ç’4K³<ËÓDÏô\Q6uSWm 4d          Çs<Çs<É“<Ës<Ç“<IÓ4MÓ4MÓ4MÓ4MÓ4MÓ4MÓ4MÓ4MÓ4MÓ4MÓ4MÓ4MÓ4MÓ4MBCV d  ˜´ÔbîE—Î9(-Ö`2Æ˜“–‹ÉBÊIÌ%SÈ-§Œ!C£ØBÇ1HbJ)d!h±ÅV:Ç ÖZkL©”Y D p$	p$	         8  X…†¬ â £iğ<x<ç8§ÁóàyEˆ¢ã8šÏƒçA!Ššç™"\ª[†mk'šP]¨*l¶         ÏóT®
+×…ìB–=ÏSU¨*\²Y        €'z®
+×…«B–!Ëç©.TªÙ†,        ÀEÛ†,C–!»eOm²Y†+C–        à‰¢mC–!ËeÈ®'Š¶Y†,C–áº    L(…†¬ ¢  Š"Išæy°,ÏEX–ç‰"4ÍMš&Š¦	ÏEU…¦‰¢ª     À  ÀM‰Å
+Y	 „ 8E’,Ë²4Íó<OaYšæy'Š¦©š°,Mó<ÏEÓ4MX–ç‰¢(š¦ªª*4ËóDQMSUUšæy¢hšªªª®Mó<Q4MUUU×…æy(š¦ªº®,ÏEÓTU×•e                     FĞIF•EØhÂ… Ğ@  `bL1f”’TJIRRRI%’Z*­eRZk-ÆŒJj­ÅXQ)­¥Ö2*-ÆÖZ&©ÅØZ+  ìÀ ìÀB(4d%  @¢”RŒ1F¥TŠ1çœ“R*Å˜sÎQJsÎ9)¥Š9ç„”RÆœsÎ9J)cÎ9!¥Ô9çœsRJ©sÎ9g)¥Ô9çœ³”RÊ˜sÎ	  *p  °Qds‚‘ BCV ©  Ç±,Oó<Q4MI’4MEQU]×’$MESTU×¥iš&Š¦©ª®KÓ4MMSU]—ªziªªëÊ2×EÓTU×•e         @  x‚ P«#œ² È   AH)…R
+!¥BJ)„  8  ˜P
+Y	 ¤  Æ0æœsJ‰bB)©´T!Ä„RRj­iŒ1¥¤ÔZÓcRi©µ¦Rç¤¤ÔZŒÍµÎAH©µ›“¦”’Rk1F)M)%¥ÖbŒRÚšRk1Æ¥ô9¥–b¬5J)¥Œ­ÅXk”RJ[‹±Ö  ÀlXá¤h,°Ğ• @  aŒRŒ1Æ„P1ÆsB¨cŒ9!dŒ1çœƒ2Æ˜sÎAcÌ9ç „Œ1Æ˜sBÆœcÌ9!„Î1æ„BçsB!cŒ9'  ¨À  ÀF‘Í	F‚
+Y	 „  Æ(ÅcÎA(¥RÊ9ƒPJJBAè„RRjsB¥¤ÒRóœsB(%¥Öšk!”RJJ­ÅÖd¡”RRj-Ææœ!”’Rk±5çD”–Z‹±9'c))µcŒÍ9KI¥¥kmÎ9§RJ­ÅXksÎ9URŠ)ÆZ›“RÚšZŒ1Ö¥”Rç–b«1× L  lœa%é¬p4¸Ğ• @n  aŒRŒ9çœsÎ9çœs”RÆœsB!„B%•Œ9ç„B!„RJsB!„B!¤”:ç„B¡„RJI)uB!„PJ)¥”’Rê„B¥”RJ)%¥B!„PJ)¥”RJJ)¥B¡”RJ)¥””RJ!„PJ)¥”RJ))¥”B¡”RJ)¥”RRJ)•PJ)¥”RJ)¥¤”RJ©”RJ)¥”RJI)¥”R)¥”RJ)¥”’RJ)¥RJ)¥”RJ)%¥”RJ¥”RJ)¥”RJJ)¥”R*¥”RJ)¥””RJ)¥TJ)¥”RJ))¥”RJ©”RJ)¥”RRJ)¥”R)¥”RJ)¥¤”RJ)¥”J)¥”RJ)  èÀ  ÀˆJ±ÓŒ+À…P¡!+€  Àé¤”RJ)¥”RI)¥”RJ)¥”R*	¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”R `t†`ô„t’Qe6špá(4d%   ÃcŒ9'!•˜j¬”rÎ9Ç £Sm5FJ9çœsRŠ©Æœƒçœƒ:
+­ÄT[ÁsÎA¡””bŒµçàZç ”’RK±ÅVco­sJI©µkÍ9!B)µÖbŒ½Ö„tTZ‹±Öœ{B¸VJj-Æs®=!\+…ØjÍ5÷ŞƒB¨ÔZ­µç{B!Th%¦\{¾ç „:·Vkî=÷„B[[©)·às>!„2ÖZ{>!„BbË±÷ „B!„¶æŞƒ>!„BsïÁ! Èp @\0’:Ë°ÒˆOÀ²
+ ˆ € 0  0Á  À
+ve–Vm7u’}ø„ØŒ¹”Š™œz¤†Z¬;´‚¼ ,4d% @ À0¡ƒ{dbÌAëBˆ1(-g
+¤”Ø1†bPZÆ˜BH1isŒ!¤ u:§rTRk)„Z¬9×ÖRŠ   	 0@P0 F:Ú  2BƒƒL x€ˆ
+ ¥]Bé"Èâ'n<qÃ	Ú@     @ à  ¡ "¢™™«°¸ÀÈĞØàèğø 	       ø  HH€ˆhfæ*,.02468:<>@BDF      @         OggS .      üA©1   íY?u¡•¨– T+ö‹¡Z±÷‹8hÛÈ²ZSSsØ£]˜ J¤ÒeÉ"#(Ô '‰zZ‘£TG¤"C£ BIBŒ
+Iäx4/ItıàêrVÆˆëh¹œÍ6¶œé\.§mmm¤ëë­ƒ[yG±Ø‘Ú¥5°$Aç\ŸµmA{]s}}ıàrï\.g{Íåñã.gÆâÀZ®£9—Ëår¢P;Jó <­Ó°¹­ŸÕiÈ¶)#Aäd¦@i×t0!ÒÚ ˆê>/gX¥\ ØÏ8ƒËr—É¹eÀu˜-eíl_*Û+ÀX=©xrw#ä¾4‹±İMİŒŸ]íH,‡¨AŠ‰]o7  RûÚ<!ŒGİãÑÄhèMu_=õáèX³?öhXaâÈQML‹2rš&Ç zøÊ—ùf¢¬"—ø²³y>%£M ã8ÒĞŒ35cDÄI	sš”M•$œ×–ÃŠTXŞªÎ¶\Q^‘YÅ‘eÁì½ÅsÊìs±­¯T—kİRÍî3 "Ûyi’Ff·u›<ÚÖZPÊnüE QFGöé‹Â…©¯·ÛìĞ> p w&#6npÆ]6ÿMñf÷¥?•FÚÌ1»°/ \ÆQ–Ã‘ ~§’%ı²À8åúëÊ*ÆU v¬’JrÄˆ™Dt/Ëj`hk°tä²G­8ØQ}ÂáH}“Ds u¼«ónó‡<qğ'GäİÅ »Ü=Ï,4>ÿ¥ùS©ˆ«ç”Í{¡M\š)YDú¡g ²v<ş„nú®3é´:«nÓœ“‘¡ö-W2»t+Eé®|&ö^§ÇGÅ‰Û§á™zù‰¢Yèx8#!‰ˆIFÊT"(²q¢xh_‘8<¼‹ik7×i}±ÍOÈ ×®ÔW9,RÆõ}ovß{ööp{Ïì½÷Şû²kï/÷¶ËÍ0e?z´@àÂÀ{Ğşø\˜İRïÆ³àzß*ûÃÎ¾³e ºBhRû÷~O˜A@ï»€sf×* OggS         Ä\D"    ˆ:±¹vorbis    À]      ÀW     ©OggS          Ä\D"   8Lƒ[;ÿÿÿÿÿÿÿÿÿÿÿÿ¢vorbis+   Xiph.Org libVorbis I 20120203 (Omnipresent)    vorbis$BCV @  B*­c:È!Œ¢ BÊ)ÇBĞ!£$Cˆ:Æ5ÇcG¹dŠBÉĞU  @  ¤WPrI-çœs£WÌqè çœså gÌq	%çœs9ç’r1çœs£Wr)-çœsGŠq§çœs¤GŠq¨çœsm1·’rÎ9çœsæ ‡Rr®5çœs¤gr%çœsÆ gÌqë çœsŒ5·ÔrÎ9çœsÎ9çœsÎ9çœsŒ1çœsÎ9çœsn1çs®9çœsÎ9çsÎ9çœs 4d    ¡(Šâ(²
+ È  @qG‘K±ËÑ$Y      H†¤HŠ¥Xfi&z¢(š¢*«²iÊ²,Ë²ëº.²
+ H  PQÅpY d  `(Š£8äX’¥Y„†¬ €    PG±Mñ$Ïò<Ïó<Ïó<Ïó<Ïó<Ïó<Ïó<Y     ‚(dBCV @  !CR\
+BCBÎC©¥ƒà)…%cÒS¬A!|ï=÷Ş{ïĞU    a8ˆÇ$!„b'Dq¦ !„å$XÊyè$İƒB¸œ{Ë¹÷Ş{ 4d   À „B!„B)¤”RH)¦˜bŠ)ÇsÌ1Ç ƒ2è “N:É¤’N:Ê$£Rk)µSL±åc­µÖœs¯A)cŒ1ÆcŒ1ÆcŒ1Æ#Y €  dA!„RH)¦˜rÌ1ÇBCV €     ER$Gr$G’$É’,I“<Ë³<Ë³<MÔDMUÕUm×öm_ömßÕeßöeÛÕe]–eİµm]Ö]]×u]×u]×u]×u]×u]×ĞU € €ä8ä8äH¤H
+²
+   €£8ŠãHäX%Y’&i–gy–§yš¨‰²
+        €¢(Š£8$Y–¦i§z¢(šªªŠ¦©ªªjš¦iš¦iš¦iš¦iš¦iš¦iš¦iš¦iš¦iš¦iš¦i¡!«  	  ÇqGqÇq$G’$ 4d      CQEr,Ç’4K³<ËÓDÏô\Q6uSWm 4d          Çs<Çs<É“<Ës<Ç“<IÓ4MÓ4MÓ4MÓ4MÓ4MÓ4MÓ4MÓ4MÓ4MÓ4MÓ4MÓ4MÓ4MÓ4MBCV d  ˜´ÔbîE—Î9(-Ö`2Æ˜“–‹ÉBÊIÌ%SÈ-§Œ!C£ØBÇ1HbJ)d!h±ÅV:Ç ÖZkL©”Y D p$	p$	         8  X…†¬ â £iğ<x<ç8§ÁóàyEˆ¢ã8šÏƒçA!Ššç™"\ª[†mk'šP]¨*l¶         ÏóT®
+×…ìB–=ÏSU¨*\²Y        €'z®
+×…«B–!Ëç©.TªÙ†,        ÀEÛ†,C–!»eOm²Y†+C–        à‰¢mC–!ËeÈ®'Š¶Y†,C–áº    L(…†¬ ¢  Š"Išæy°,ÏEX–ç‰"4ÍMš&Š¦	ÏEU…¦‰¢ª     À  ÀM‰Å
+Y	 „ 8E’,Ë²4Íó<OaYšæy'Š¦©š°,Mó<ÏEÓ4MX–ç‰¢(š¦ªª*4ËóDQMSUUšæy¢hšªªª®Mó<Q4MUUU×…æy(š¦ªº®,ÏEÓTU×•e                     FĞIF•EØhÂ… Ğ@  `bL1f”’TJIRRRI%’Z*­eRZk-ÆŒJj­ÅXQ)­¥Ö2*-ÆÖZ&©ÅØZ+  ìÀ ìÀB(4d%  @¢”RŒ1F¥TŠ1çœ“R*Å˜sÎQJsÎ9)¥Š9ç„”RÆœsÎ9J)cÎ9!¥Ô9çœsRJ©sÎ9g)¥Ô9çœ³”RÊ˜sÎ	  *p  °Qds‚‘ BCV ©  Ç±,Oó<Q4MI’4MEQU]×’$MESTU×¥iš&Š¦©ª®KÓ4MMSU]—ªziªªëÊ2×EÓTU×•e         @  x‚ P«#œ² È   AH)…R
+!¥BJ)„  8  ˜P
+Y	 ¤  Æ0æœsJ‰bB)©´T!Ä„RRj­iŒ1¥¤ÔZÓcRi©µ¦Rç¤¤ÔZŒÍµÎAH©µ›“¦”’Rk1F)M)%¥ÖbŒRÚšRk1Æ¥ô9¥–b¬5J)¥Œ­ÅXk”RJ[‹±Ö  ÀlXá¤h,°Ğ• @  aŒRŒ1Æ„P1ÆsB¨cŒ9!dŒ1çœƒ2Æ˜sÎAcÌ9ç „Œ1Æ˜sBÆœcÌ9!„Î1æ„BçsB!cŒ9'  ¨À  ÀF‘Í	F‚
+Y	 „  Æ(ÅcÎA(¥RÊ9ƒPJJBAè„RRjsB¥¤ÒRóœsB(%¥Öšk!”RJJ­ÅÖd¡”RRj-Ææœ!”’Rk±5çD”–Z‹±9'c))µcŒÍ9KI¥¥kmÎ9§RJ­ÅXksÎ9URŠ)ÆZ›“RÚšZŒ1Ö¥”Rç–b«1× L  lœa%é¬p4¸Ğ• @n  aŒRŒ9çœsÎ9çœs”RÆœsB!„B%•Œ9ç„B!„RJsB!„B!¤”:ç„B¡„RJI)uB!„PJ)¥”’Rê„B¥”RJ)%¥B!„PJ)¥”RJJ)¥B¡”RJ)¥””RJ!„PJ)¥”RJ))¥”B¡”RJ)¥”RRJ)•PJ)¥”RJ)¥¤”RJ©”RJ)¥”RJI)¥”R)¥”RJ)¥”’RJ)¥RJ)¥”RJ)%¥”RJ¥”RJ)¥”RJJ)¥”R*¥”RJ)¥””RJ)¥TJ)¥”RJ))¥”RJ©”RJ)¥”RRJ)¥”R)¥”RJ)¥¤”RJ)¥”J)¥”RJ)  èÀ  ÀˆJ±ÓŒ+À…P¡!+€  Àé¤”RJ)¥”RI)¥”RJ)¥”R*	¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”RJ)¥”R `t†`ô„t’Qe6špá(4d%   ÃcŒ9'!•˜j¬”rÎ9Ç £Sm5FJ9çœsRŠ©Æœƒçœƒ:
+­ÄT[ÁsÎA¡””bŒµçàZç ”’RK±ÅVco­sJI©µkÍ9!B)µÖbŒ½Ö„tTZ‹±Öœ{B¸VJj-Æs®=!\+…ØjÍ5÷ŞƒB¨ÔZ­µç{B!Th%¦\{¾ç „:·Vkî=÷„B[[©)·às>!„2ÖZ{>!„BbË±÷ „B!„¶æŞƒ>!„BsïÁ! Èp @\0’:Ë°ÒˆOÀ²
+ ˆ € 0  0Á  À
+ve–Vm7u’}ø„ØŒ¹”Š™œz¤†Z¬;´‚¼ ,4d% @ À0¡ƒ{dbÌAëBˆ1(-g
+¤”Ø1†bPZÆ˜BH1isŒ!¤ u:§rTRk)„Z¬9×ÖRŠ   	 0@P0 F:Ú  2BƒƒL x€ˆ
+ ¥]Bé"Èâ'n<qÃ	Ú@     @ à  ¡ "¢™™«°¸ÀÈĞØàèğø 	       ø  HH€ˆhfæ*,.02468:<>@BDF      @         OggS   7      Ä\D"   ».Mâ'sgeL<eAZAeLj„l€\te‹vnnw•›š•š—©pt 
+vw9ÅÍ>o¾	õæİå4û¼ù&Ô›Å5!Ha      ìÓ¶Î¥¥¥¥Å©4…jRc$I’Œ±X,ÆÑ¹\®®®®.—ËcWĞÎ¹\.—Ëåle…ÿ¿µ‚ÉÿÿÿÿYk­€µVDa#x‚²ÖZ <è—ï¹@¿|³Š¢P­]ÊÊ"«Õ4Lkh  ˆ[A#£8#'i+H$äh’,ÄòŠiR¡,éêêr‹ÅHçrYãp1t.—•ÅÃr9+Ééœ1F£$Ëä´´˜»Ô(N/ T§ùĞ—uuš}Y›…² F#*JŠAĞ   @Å4LÓ!NCpX6ÓnS›Ój8lNœöc5–‹™,Ëa.VíbueZ,W–Ére9:ËÑf9J#M™cÆrQÄ$
+Ë™2)ÂºŞöo‡=)ÂºÚöo‡4&j„²²b$€
+u”      ‹XL±ši»-`ê©İ  ¸Gï½ °Ö}+ F¬,Q 4§Ùå7 9Í.¿è ’B@Š4      »$2Ò†	€àµ·Z, )  ,{.ç€‰–®{<§©	sİsšš0× uÔ.ÀDÅ ‘	€  1„Cˆ(F)v´Â 
+c TÔ†Ã	@ à“0YXZdÙÅXÎ±˜Ë,¬ZÉê\Œ¹Ì°ÌĞ Àfm6Í ,¯©‰6Ä}yMM´)î¦  X&”Ô …
+€…    À1%a³¨Å vÃ ’€  ØÙÇË   2™ª%ÿş¸—R¡ñ&Sµäß÷R*4>ş@¡ÂD AI•Õ	 Ì€²V    $›µc³¨ÃB4CÂ     ¨ş€)ÃR ‚;fåş   ¹`#  ,«¶ÄÛóµ¬ÚïÈú(/R@ ˆ
+ ,    €
+Ø±Ù,vG j±ªÕ	  étÀ ”qb(8M ,©pvÌåÎÎ5 %¨œ„TQ) #ÔT Ğ& `  Ó‚)bâP/hê‹;Rë\-Åè  H
+6 €H ÌŒÙafÌ.ºcÙE—c±Ú•®Å²Ë,æ\d™ ã¼4  ,©e‘æê"/©e‘æê" J”J  T JJ $ €  P¬‚ÅH8À°%ì6 @D¬¦ À„Q €»ãö{>ÅB    òX:D¨zû?JNãÆÒ!B×ÛÿQ"}ŒQƒ,QLi0„šÒ  < ÊZA 1  ‚Q¤Ğİ:â”İi “¡b«S#    ¢'ø;(—¸©à€`–Q,° –ÀÄÒ`  D§ğdx¢S8M@*,Ô­™3•@"™P1ÊD ¬‘"€ ì`… b©…Q¯OÀ!Ü
+¶QˆÄ¢‚z,!â@bÄHpVÈ‚Ó<%$Ipš§„,Î‹)I–ÉËå4‹t¹l²X,F;—3É"³].—ÓFÆ æb Ñª!m<8âd $§œ&Ó'§œ&Ó/ õ×e”Õ:edM†°Z³ Z@3ÈÚ  @ìFVñJ’¢qÀ B°ÁØ=wVe!ƒPœD ƒƒ‚ƒ@Ù“‘ÔÌ³s˜‹™ÌQ™ÑÌèbb÷fŠPˆ   ` ò8:¬´‹ò¾_ü*=åÇÑaÅ&ís¿ğ²¦l¡,‹RóH D)  Œ¢şÌgH  Ì9@Ô$   j‰GUWÇ[¬3\>ZI3tÈ
+3
+ Ši„ú3ÙUµÖœ'Y    80D €‰Ø$0H÷Ç[üî-¨
+$çs šÕ $'ÇÃm¿’SbWûµ <tfâÔÄÚY("!Ê@% ª3™€…4ƒÈ `€È`=ê¿–“\=&¿‘ ‚0²åXó$‚   0Q h ¸ùï €$  D,),Öw.’vÌw.6ñ°Tf%¢""Q"8  %PÖ Í ¢
+  H©5º#'Än‚@ÑÑQLSC’ö%) 7!  Dˆ0+ieØ—‹à4w’…´CÖÇ´c1ºœ£sc ÀŸÅÊ"ZA$)tüIä’Jšç3s¢¦(KT”%(J& 2ªµEhê	@3ˆ™” €‚  dIÒuş’ƒC)ÙÁ„(‚ƒ‘TiY2 ~– €}0 à€Ğ  €Ù¡ö òx:Ê”Ô8è´xMŠM…&=éG¨|¸†Œ§¨(iM YÈPY– €ŸøêR `Î ²V   @|Ş¹ÿ¿ÊMÌ­c/ÿM2&ü©A 9¤%Hcˆ[í/¶   äª+¯) @|KB£O±lµ5 ˆ^s  È…’(  $§Ñ×å„Åúù ¸¡ÇÚÄìy€æˆ ¤Ú‘À¡M€È‡  dQ  k¬nKÜa—îŠ2rnk:cv²mC$Iy°­  Ø%¡  €ÎG À\Î¹\vu¹œæÕ*qGr„œt.   §œác9åç€ê\ãÚGG~€Ê  2**ŠHp 0!4ƒ,+ )  À¨&ä*£àÍ†çrnè!]J—‰9IXÆrB°ˆÁ1ÈÁ øU  lE„¨k¢(d8ñ¶Û N+   2	[aÖ¡ä%•Ä$lKÑˆ¼D%‰& h¯D¬še½PôRîP«L À9dÔÎ <@Øf P ˆ  ş€ú¸qšüœ¥¾ªe/Â5,i•Âİ
+1D   ($,X8X1@şÛI   &Ô°ïc ÀDƒe Øƒƒ9 @”•F  §ÒÁ‰â”SôXèP}5ÍûÃçèkj	yôræ  ¢4$€"@ñ ál •HÅ;ú‹-ñlq6£‘¤¿ƒU—°¦o HÄ6   éò/-&ƒ­Ç]Ì  €Ç  ÀÑÁh À°+Ê   'Ÿ¸PrÂœA€:·Pø´Vš]/ÀHÙ€ ! Èxœ Qf2}¸ Ğ"× R  UEt’'ûJqùE¿ú¸Öµ¼Ä¤’q6¥SYIÆaèT*&´í8Fì#¿> Ø{ˆu·  Ğ„m# ğ8xäÂ‡c1Æ8“ĞIZR   $+Ÿ0Ç&«ò¥ ‡‹CçšW | WP0€Ã çÁ  Dİ € P‰´ª¢…Î¥£Göl> Né‡/ˆŠŠzv£œµ¬F–åM$€-®(dÙ2œ¸Ö
+ €²Q0`fÀÕ.h^½8¡½   :yZÆT\Ë$ÒÅ>VŸÓÕİ­1p?¨mã ğ@éÈ²–  ˆ¬Œ2 Â¨½/ÿ  >€Ê€ @Å?ş-M­”4µŠéÙ4 ;|¦­¶  ëğÜ†P@Ûş €ŠMp´àe!©ß   @ÊrY$îmŞ8ï ¬™ÓÌ   pï  4P~Õ¾0 şH:l4†#;İ^ŸuI‡ALy°ìº[ãØ\Yà’N±F=€¨& ¸5i8 è€ÌDÅôb 4 ‘] ˆ Ğ9÷İŸÿ°_¹µ”?ÿåo <NØ@1ïôs™+   °ò:@¼[~©     ŒksÍ PyåböYâüQ»—  Sj’BÆb±X	Üw` P  "   Ş8:`ZÚ:Óª«=6l2kãî&.€:¿DCÜÒÔcØ È6ûk‡I Ö@–b j TÒ`€ À¨ÇÀÂ[é¸2•¡÷îï£.\É°Î; ş?@È
+ã¼mìn&   Àšk°\Ûd°Œœé5      Ôc“  8‡ ÀprI  & @V
+ ¾8:$”ªP:‹^nCÛt¸°hİÛ¬KI‡ÃÉÿõÄ	 û×*´@§˜ cVÜ bR`0  ˆ¡½,CJ;¢TÎÂê™z€Ò¶’ piÂ €a%- Ú›N ô™Y×(   €ëÎ°”~~õ`Ÿ•äÇ¥ä:  ÀÈÿúã€h   ŞäSXÎ  Ş8:$œ“°Vyz¿M]h	vè½bAó< ||ånPÎ£õ	°«+ ˆG‰¡
+@>ˆ1Òÿÿ  È   âh¸;Í`ÈDh×VVò"Ãø3ëô u™v @Z’[½0   ê Œ °¥ÛfÎùõnMbã›ã³    öTÃªˆšf€€<Ü   âÌ2°h ¾(:DŒnÔĞ,ú³(ºÁg&½Ü‡¬ük­aÂ¾Ìºä) ?†  WğçèK Z^ @X)0   Yöé/÷†Ê¬õ\ÂÜv Àsc  Pë8!3šÓ~ ÀAş46€ ½_Ï?œ«wU     À©O  Êïc2ŸwëScØÁ#è\ªğ D°\	 : Úl”DO ßsA‡pĞ™ôY·qØ¿Öu‚|„ko@CĞKÂÍ//_,kv @¸‘] ˆ sÓßôB‘Ã¦çÛŞßkPP
+´Ö˜,{­ØH 0’n6†Ë€l£ûû0öÍ6     tÇ.  ZæÀ€O·Öö¯»k 0Ñu-å//˜  ¨  öº€øœ\Gô=3:äXm:¨™®j9ügÀ6³ïeˆze/VY·H  ìû€IÌí	ˆOñ¸ Hs¤À€  3¯÷K×íÃœ–´ÿÓnÿ0òµéÆ €o¾7JSWQ @UÛ~>c—5uëİÀíÿcã”k8KÛ €  I¯	  {Î¸C`ÙûEPêè~/æ«£ÿ Qws)    #ñ$í1r$çn? ‡¿1Û‡Y0ÒOà¶ Àe,€…Î  ‘tDïÜ•¸[&¿Çtí¢ßí®Ò×ª Ê¤³\&¨‚P¹Iì§Ú ˜ö $le> ˜À  Œ‘FçjÑU  £Ä’gŠQ¢È®÷p©ß<ã^bí¥€ëÍ™à}+*Š€§°€ õ8©"ª•U“}˜Uô2FÙW+©×yrI1€ªXÛöáQµ-Rğrù«Q`ãò9j€\
+šŞ·c‡ècŒ¥×İJÓq\.ç\.çÜÛ¶­ÀÕ™K °Ëƒ  ,©ÄX‘—T"c¢ ÷:á1êıQÖ`¸ ˆò"àG Šˆ*nµ„µ‡Î³__¨Œéµägy¹¤¨¨øĞ8òYœ lW“j„•@ªÔ­ i¿xffZ–z©òTÍÙÌŒb!   OggS  €h      Ä\D"   †¬ùÜ¢‘ŸŸ¦¥¢ª¦ª§©ª¡š­®±¨±¬£úhÚVJ=½µReø"O+Îš‹™‚#eŒ)£XW!iËô˜` ´Û•8Ù¿ò  ‘•õg Ã<@-0½¥@› b  0KŸşß¥éá„õS]ÅñÕ¯,@¨<– ½5—óÃò¾  X#–ãâ!ÃìÑÿ# @   ˆş#u  ˆ9GŞ—%­T}s~°5­« ´ @= Ò Œ§0  ¾:ä´Ú¼”™EW^8ã(^dòùõ40zí¿L±œI1 Ôl ğËÆP 
+2 ğ4 OÀ   Fk‹îÍ¿´]¥9ıÖ÷¼i7ÔR· âéI €ı:xÌ“    @{» èi7 èa}ÆÈ   ¤#ı× €C   À¯<±) £  ~ø9¤´ZÌÌÌ`ßÌ!èBbÌéâ³Omº 	>Àk¿A_Îj] ä¬	 ŒıhGü|.  d¬m ½Aœ7 À—1   tã%{ÅÒzYAZÉDkO¯_NDã¹Û×MÚdÀËç  L–¦Å›r   @ošÿ  „[¡P‡Â     ¯5 Àe›j    Ò¼Ä Ë ^è9$8
+t*]øt¡3f7sñ9İ£‰*Àñ—Ww`ïGN½Ì€}ÿ,şà €=ÿå ‡Åß‡/øé{hàx
+,   ¬­õgş
+ù¿px¥øòY˜Z_9ëá9Ó TÌ­2 0vûà3    5gÀx3àb\Cè  À~ÔŞ   àÿ–¤ Ë ¾ºØ,„²™NWsºÑ$BSAï9Æ@ÿ'ğìÎºß–	¨Ø‘ ˆ÷Áğf 2à¡×€ä[^Ï¿  ià‹€  Rî¤´³ÆOŠìªGn7s#EB¬µ™D0ÂÂZê,[º|Ç„…Á€ƒ£¦’µ‘-Üh{0b;{Õ_ À  €×Ê¨ş¾Yçî#Ç.§ç¨P –Ã    T_   Ş(:®fçM{á]hrZ^ìâ¥t·M\ ß»tLómÇÃ Ö&àÇ¤ z½PÓ­Ò\€šÛ x ô÷ˆ0   wMğ™âÎ€c‘éÇwØ°PÍõlû,IÈ û2  Ô7ëÁ\Üö €Àÿÿ@DÚ×şÇ
+ Âò@ Èwº¶ë      *}•`Ô÷•   Ğèæ^
+À\M :”œV“H§[øÙvÔdf?8ºcàë§8m£h!	æ¿d>Ÿˆ¤ø–ø¼  §ïNÀ   Œãêµsô¯Ş–ÊVT  jïÌ¸  jÿÄq@*î£'ñš¼æ ~®…Ğùšê×G  @>T= @Å\ûÕäÑğæ‘>jQá¿ËYg  ¸ÎtVN¨`1
+ >Ø9l@š²³èj=‡9ÒÅª]WÃ?è?v g¹×`¿K6õ"  ä°Oüë0Å Nš)p€ @=´Å¬•Ö­Ùúyà%ß8şR%   [/ö£M0À‰ÌÆû)˜ÿ“… ƒ  &<º   †~;ŸçùìQóìçÿ»„Ğß|É{4€;ë1ïÂ  X  >èÙbZ‡w–½N{èYÊ%]-2í:œ&P€Ÿ*¿ÁÔ–SôĞÇ€¼¶œ•š 'PNÀá4ğ¯¤À`  °Ñ/7Qï·ek=²®Ú¿k™—Í†²ó ?²õ€ 89Rû¼¯   ^Ş–TB Ğ&¬õ4ªtP   ÌËC  ÅS¯¤çë³RAqoÕ‡í³úla	#A«- ^èYAÖ¬\JåíuêBÏS.æBd›6ñ£€õñ»‰É=*½bh`9ü·  ¸%@è·ˆó‰	 ”nÌ Ÿ@  ôpÓw†ñ¡íi÷ss_K¹ºÜE±›†¶œ £ı‰; <³úZ d]   Bgm  ¥sí_Q ÇyÆÈ    ë¶ó  Çk2 ’  ©‹@
+ (  ş×Ù|¯e&Ùë”ÂÎ¶Ğ7YdÑiÃ>ü¡L¸o»¼Àü×<‹ÃŸÿ  ¬ Æ `äÜ àY à:Rà	€ `=‹-C®]-iZUc÷nûXFZÃ‰Møö€áåàaDİIX   ÀkÎÛ  ôú/µÎß¨( ‹Éï  „ê0l   PÈ:  š9Òƒ€'£°XÔşl „ ş… Ö >ÈÙ6r6³Ot{]ÈÙ&dVªW*7<cà÷×=¬íéópï `İG–o  ø7İ€ºıÓ7à3ö7 àpS`*   ZQ½]ÕËÏ*¹jÃ³hùÒp_š" D_Â;<K   ;üÌ„=œådG š»·‰ Î·@ F  €øiÿ   Á£ÿôCövı˜-Ï`‘,¬™Bø ÀJ
+ ¸9`|†B³è3¸9pÚ˜¨tD \ùï,öüèïûüV£ø @³Î j ;Ò üœÙ 8hÎ ?  €;	û}šÜ=E=köåíbÄ…±¶×l+coÀ ÆñÓ²ÀJi  ƒ
+¿\ÇÖÑ]ÕÌ7ª/‹¢€^oÀÖŸÆü0 <  „´*  <_ À¹Ğ/gL‹+ –#  ‡¹@ø€n f[(W@u': 	€?”up›œrŞeX â3°. ĞÈ€ø<˜üœù p
+)°   ³ç®¥	^9v¿=Äaß‰Bß ä½Àç19ƒ0Â‹‚­ô?€#@ø'ZÏWwNœõjñI¤‚rÖ  H  x:ô €±a0‘IûHBb8€ÒÛã Y şwÙFd(:Ş{˜C‚ÅlNÓ&€‡7&ö™ ÷O 4}1  ĞO	Pö .ö~ ™3 ôÏ € @
+ÄG½şœşç³,j"Õ¬Ù™V"›ÕgÜùõ- ï7ö‘äÖøÖüc €"€à–©,Î:AP‘MËMÅ]AP4Ì7$0²  şß Aûï²$#@Ä=wDJëİãƒ  ^g¹	§µ€¾áüe¶;D×é& L…o5¶ıXz_	[|N  Z ^Û q>ŠÏ °¿   |¦–'U/Õëóó]Óˆe/ÌE˜¶>¹åÑ0?¾-Ç˜#×¯²I lÑ=ŞÖÓ‹¼k5HOeoøà¨  hÓ6Ìáô€1  è¼D`Y:ıC Hşx¶€…˜@n|îÀ È˜æ¦
+˜K  Ş‡Y¥|ÆœŠD/Ğ¿Ë6ÈÃÌ¢İÚ>0”ß€ådİw p>Ù9^=: À×|8Î/	 Ñ8ˆè¡ 0  pİ#?ñ^mVür²DŠ›õêĞKÅ£ã£i7sw¿(À˜sÆFxhVó­Pİ a  ƒúHòK¶fk[ñ   Úÿï @‡ÿo‚‘ö/ ĞÅgxşÿ2 €€X¤  >¸Y%Ê$^šÃ
+Äl~¸‹ÍT2MP ^[˜LËrú`ì“ ÈŠÏ¨€v
+ âİ@ñ œ À   ŞEáíR×|•îQP'Æpï£Ûü³ËÛy¼sg5ÀªäB;Â`0Ú§µ x—¿U@ëÃB   ¨{ˆ(lÀKó[µl~ (×O ¸   û{N8~ >˜YEÚ‘^š0í-nÏrØğpX ×€¸òÁ3d.û6{ äçªë>  ¸,ÄXHğóü¬ €bf èã
+€  S×“…N?K½’§Ø»°íÍ'âõ†³fé_âbÀ˜>·ñàçâ¨‡FiÙ=w   ¹îÆcÏQıxy`~)Ôyrš\€1  €cš Š;È0œş  `)İ|À(   °=Ù@˜  >˜YyGsO±7½¾Ê!Á'@§²8chÓ£ò†i>ì÷/€è•Ï# àí²@„·BÀ÷  < ¼b ß 1  mv­›¬)´7x „I„0ñÍ °ıùœåxıŞÛ   ò»e-çìB¡—CÓMÏı"XJ ¢ñÿ5c´<]ŸA@ D   ;& 4RAn©×›Ï~Ñ	î€Cğ©
+0( @“   >ˆÙv¸ÃÍÓU¹sî(‡?4èÈkR ŒÂ_jØ¾8ÓwĞ –¸äáóœ  Æ`È3@œŸóç  Jb€ñİ`  (¸ñïRSÓ^² «QSÁË¼,yÏ²+#4»€½¤’ À:wªbæã§_[  r¹v;Y×ˆâ¾–vxRx¥)€  „Qo  õúŞÀ'àk­_  q¸#i¼/¡¡x»`. Ş‡9ì±5ªÎ»óæ&	0AWĞĞ ÕÒÚz»»re   ş¼4àaÁDm6 °Ä c¹ À  €üí!´p]íö´`+³ŞL%:îï5Ãö¤z%Ó1kóbê	m   öV˜î¸f­mØó;	 òxÕr
+   ˆ¾7¢”F¿ú•şv@²Ëæ®¹c.jø'z@¡Ïùã  g şgYåòÛÕîd¯ïl]ä¢ "Äµ	€–YWÀòæîg úØâóL  Øï«1`Ü bPkO @³  ‘[  ¸Pƒ–´8u ıßì?Ğ
+OsE[ºSÚÙÛ¨zS—Û‘€öş>f+‡Û!^•   è(`«Ú¿OÈ³ÛX7'®ŞV  ú	ã©(   @.?­ €Xú‘ï ø îñë'2Ğ1²†IÇ¹ »  ˆÙBüQ–—Ógmd‘)€Jeğš uª>·{ôàÖ XåõQ Àñm >ıòºÒ |N¼h(üÄ   ø`-`ºÿLR~ı^ùÔ‰ŠL–÷şöÕ É¾¿sª¥0>‹4z¾ò! ÈÓ'¹Ir¢wEpm˜¯Ö–»÷6€“2Œ À¸+½¯ßh”co¯f]öøT  À~Üx8— ˆÙFÊUè,,.uw•Ã
+ ZÃ14^´Ãùõ:ˆÏ€ñ>˜ô	 <÷ğñÓÀDÍ£ Ì €xIg  @µ}üÎº¿y ïN|ŸGr·Q* Ô5C  îcûàåñc
+@=½XÕX‡Ú>U‰½_r’    ğh?  úı› ¶ÏX¦9¤ù¶jáqë·µ#D!æŒJ    OggS  €œ      Ä\D"   rQ°¥Ÿ©§¡¥š¤¨§±§¥ ¦Ÿ¤˜”’Ÿ¢¢ŸşWÙìOeZu‘Ã(0Á‡˜Í.àsõç\ “ çh 0î™€?à8 âüñL À³  ½¤À   ˆé¾V\Úö˜®ì_CAÛ»D+Od`§õ´qû˜–I€q‹'jÚJìr4•|n ±´ÂF€éñè¯®((‚€@~U  t/ÍÍå²\ÖE·a]}Aÿ|A ¨ûËX !z‹ã" œ şgÙ~qšâ.<Aï"‡”¬Jg#5fum˜Ö£?ë "Àç…ahÁËëŞÀä—«Õ_  @
+,  €õŒ½¡!•½µÁôàÂms r²1!z`l½…/G)õ`Øv®“ÉÑÍ!7XöNXB52”—6   ğÉÓó-  »T¯$-µß<û VÃz`UÊ×‚ÒZï€´; `€… HYÅÊEDK:·Ş^ä°S t*ƒ1ò@‡}¼ÙÓ÷­C½­B….@ä­w@5 €g @¼¥À   ¥«×a|ã^©7í&ı öS½ ü½ú7šÖmo¯×l5*2dNN &ñ«ÀH@     ı¿ p´Hö ÛìóÙşp½\{ºÌ¸ÙİÀ`¹SX Ì ä p ¾wÙ¢äÅV<Eq'¹à$*§Mc~ğµìË¯`Ì/¸<<  1ò¡5èıĞà	øìÛ? â1 1  9=ïl{‹ÒyôÓeÉÏí ôdz2Â bõwÎæ6¬—   ş{M’50¿½ièlÉ€º¿› €ƒ À ôYú¬mà
+|‰° ø¢  €#¯t   è4û  )   ŞgYÅüÅ]‡» £È“"fÎ@g¢Æ¡ÏkÂx†=ù7:ö;Š›{ hÔÀi/@Šg Ÿóx7 P| 7 0  ˆ!%fC©‹í²şÏ¦½—:„¤Nÿ%b°ZĞ=lº2¹ºô$"  €¢»ùèÛ B^¯[Å€şÿ#à’Å'    @êÈ,K¯Q3ş[†•ÁÄ   Ë~ì/6 œï  Ş7Ù¢ÔÜ\›söz7}•m£a^<r#£Öå³}UDwö—ßm?çt³ÿjnN	 ğ6ß{â|Î{ ”S@   <¼“Ïòµ+ã71;€¾™šğwmÀ€Şú.zHû‡Î§   0İjy` 	9xİ¤×
+  	  ­ÿ*iÏÏÇıä#`¬„ q˜¨ @Á‘ı @µ  şgÙÂ|nLª½»µ/³j4ÌKÂ$ÙDĞ<ú½cÕ¶gŸÀy@î+&? à»º,ËÏ0ˆç (x<^ Ä  â/˜8ÛÛº›Ï~Wı¾ÇE^H¶¨VB²6 Èi:]ô: b_¶@KÏÀB ÀÁ5WàËûDÂ€şö8Ù €  ÀÂ¾| À½ı>D÷EğAú] `ü £·  ŞWÙåâáL†µwÙvqÉÈ$İ ñô¾s]•W€§5 aÕ§ ` K æÙ  §    Ø¶âÖî™I_Û‰Qq¯õÚ±÷4ëëÇ@ğù˜
+§Yã{  ä8èb}­o   ı¦s  ;ûßµ,ê•«³    ‡ÿó ³¶şv¶8Ø  À»üË ‡ 9Àòâbîé|9nV•‚ çñÿ¿.~ê?vŠïhÕÑ 0\ğ9&  ì[<ÄùyİŞ €ˆÏ ÿ  €ÌZ¾øînìzIny¿<Ùá–«<¦‘`„íŸÓ‘ÁØf6ŞV•¾X@PU‘JRŞuç»»K	¨s³¥   €c™8—‚¥O[ À ÁA¾RsÀ  Bï.à ŞÙÂòj‚J:}"o’‹Š`&Ó h­=ß«hã—mš- ü½àæ à1zi Ô<   şš`Ü^ 0  Ô—õø”œúiç^æé?æ N6ÊJ®e €¾SdmôÜ(‚¢ÂÄÀòìĞã?¶!WÈDGRŸX o6 ‰L« ˆ*  
+õ   Ò	â,ÍzÑËV÷ù@KğO-| Y ^9 ˜¥N
+_zu‘CJ"f†lŒ¦’FÿìmÊ çİ±réW  ô#ÀCo@âïİ ¥/g ;   äwójÄıı¹™İuâÓ½x[ĞE¶²Ñ É%ùWM«…l@¡ƒôzméA Tºy´ (Ş*™·  !|~ù Àk²Ì¢^W¿ÜÛ¶ç·<¶OnI23ãv(àèU€Q  ~ÙÆlFğÓÑgQ¹à4Ò5q5¡0«4ÑDxú} ´Ñ`ïÖ%Ÿ=  0nğ÷y44ø jî ` ä'f ğ³   ê©ÛHºØJôœS76sØR-ù¿¸Ø¬º^2©æ Qıÿ4« àÕ6·Øsoj  "*¢£üå%á·(ğ€ª÷Ç  — 0XÓy0‹[    0.× àøÎ·9Fv kV0® x³ ¾WÙf¼ºî‹Îó`nrS¢Ğ`ˆÆÑ•|%Æ”Ë³@¾ œk © à¸>èí—hÔ<  ¥ o2ÀÅ  €ä²_¿¯†)!úî}÷å­%i€öñÅOT €˜W	]Ô–  !ŠHw½´W\V÷ËÄ³„µ1ì¡     2¿/  xcIƒ?ıoG_îÃ¨qùP[J€pß  ÔÍ —9ÌX]æ2ÜÕ®7©îrØ1DĞùÚ@ì8pJ²ï“ÛĞ 6í ôçà8- “Ÿ/ @Ì €ó–Ï   ˆewáMôÂI`"\6SÆ«C6›‡7÷®& P´şü§ ÀêYÂø—<Å…  Xä¥£#ÛM.Ÿç"ç‹ŒQàL­¶  €e  ”=ü/°t@ñHnÖ+ Ìÿ¾‡9`Æ$ª%^Dw—£á´
+Tzk(Ğìºì1Õç4ª/ ği˜ô ÄÇğùY¤À§† Ì€q=3 ø^    Îİ˜Ï¢ao|ğŒİµÛ…`Ï×K¢SÏbyä'À‹c$@ "TT=÷ ƒA l{ÜC °çGµ  ã÷3  ói   Ïl  \ï¼ 6pÅ, ¾—9DŒnjI¦*½lÍ] @ÇWãàJ5À»˜=r€åoÀ«êæ  }€š~§ëà“?{ €Ò )P
+   `ŞŞØ»~\)H¾09K[Úı ¼—‘  Øşİ#ËòÃ   ÌãîÅÛÜ¦›nàešq ,ñ¶Hôäî     `_N àÛÛ7pÊ¹q}€-Şü|ÎˆîPœ ~w9L&–$ÙëeÅİåÀ(@k¨ô¢Wã Wîİ‰5;€ˆ÷ª ÷+n  Ğ&æ.˜|Úû x ¸™À   €vdå8àÌòØğ¤—¥Õr½GÇ°ÏÏCò%  ¸sÒmV  à =æ|9ƒ´,Æ‡c7Ğh# 0  â<  ´‹8Ñúqö>ê-¶ÌÁı#IPuÙ».€ >g9rBÍdÒ»ãs8•¸
+tq‡—& (9gÃİZoé Ïz]À  XöjİğƒğıL€ÉÓ(È(   x‘{*,>ŒÍÊ’¤ZŒëK‡?ªù¾b–|³Ÿ ëşï)€æü•Q$äH+ŠâÒ>Ìu3€#ên§ô üütca  €Aú”  àgø €/Z[Û%‘Àßõ0 n ^g9²c*B²7ø{™CB1¨tx5ªjàÄêĞ@ËuàãæÑ  <T!. Ã n    âÖAK˜™sìU—İÁ’ñÀöS¿€ {õµQ1j.xV    
+víèÙıšëéŠzÈ;Ë~Æ  €X: ³[×ñöü·îªóa
+ÒRıg  TÇõPPP ?Z ~wYUˆÊäŠe¯‰»Ëá„S\J`ÑAŞ YW@oÃx01ğlºy6 €ÈA~H q<   zF‹&û?j‰&ôDtü¼:3D%£	¯õ˜}Ú8J.  èæs»Ì©«r5ü$   ¬£<jz ÀU(ïc ^ö  (àÜö´‹/€   @ñ  €«ók ~gÙRÊ¤Õ:¨îrÈ)ATWzã‹qh¥oUğœ1Ğ¨w ·ÃŸ» 0ÇÀÃ›‚äI ÇÄ   €àö¾ç¢œr¤ƒ¿ì6éEB¼QğÇ ÀhÔÅ»€  öÆ!©FÑ³ø¹úø0¾Ìg‹  HAuÔ¯ôĞÅwŠ€§ë8°  À"tõ9  Ö÷>~wÙVrZŸ$ú†˜»$¢˜4/ÆÁ³r€½Õ}ô_şÀØ/ûß
+  ŞyíÀÃ›@œ·€ˆ™À5   U³â¶<eÿû‘æZïÖ» ”ô¬0 J[#“†l!ŒÀhü#à¢IÎíÜFàû§A    °Ïeğöâ³®¯·O??¼,vå¦7` N Ãv„ „Ğ0ù/^w9ìød4Ë]èbír£ :_›  òA	Ñ¶'ö ˆ[€7¬'  â|Ğiài 2   ñîéd…í’aK¥ Çe‹
+Zßh¾ğ™ëä7€0*¹äÛ   éiÛ¿DùBØ¨€ª·=uÀ- èö^  Ú[ª+Äº9Ç]zåº}‚Æ÷h¾(x  @6ÿŸ   üğF >w9ØHĞq6w9œr 4ã4
+u2ĞnÛ‡7À” ?’À°¾0F5°î i~€§h ä%R`   €\û“ºõî½g©ÜÎÛì²‹§ ¸BC”	 —6"È{«_èİ´â6C/•F9 0¼c  >ïíê
+   `Xw  z£ më¼Õcûû²úçù‚øÏ:ƒ¦ÉFLœ` ^wYMù3ŠEWùİe»7¡x:Ía²êœõ€ÈI? XÖo‹‡;  Í^÷8PG	 #ç @ià‹   Ñû‘Ûµ€~»Gk¢'Àg¯laK ç¤×Ù_ÜW—g#PÌöùÜ~i—@ Ï‚kß¦»ã®€²Ï$„   €¹ºìöğëÇım¿;7f¯¹°û	¨ö¢}˜:b   ¤ïn ~g™:yÅ5¡Ğ¨î²´	 ,:Ìâ·3x,§W@´ ˆñF…w\5È÷Ğ€4 O pëX    ËyÜìª¯ôç–^u#ßÓ·Ä¹G= pm€…—,÷Oo§è*«Ş“ë^<Ó€e|ñŒ0|ùújÀ   Ü_ö `we²ï¿ëq‡ÏÜi™¶­Ú ÀÀÀ ½¸c BÕ  OggS  €Ò      Ä\D"   ½•š–¡¦£ ¤™˜šŸ ¤¡š˜š¤–¡şf9äØ!¦b ÑæpŠHéàj|;¼¬å¿$À¨w± à¼aà¾'Àü¢çÓ¦/ Ài    h"w4û÷”I²òîNù-0¢^> ğwÕ7À2—t›Ó<Ø²ş(ëÛÆ•0    `kùâmïwëŸ·×Çg¼üØ8ÿn#  ëş…AÀÁ4Ç) Àc^gÙfü0S:Ë^O­ºËAbL M§óµ‰àí:Ø}¹Gt çØâÄx¿ àııjÀüÄS”Ô)ğ   °Ğæ»Ëm_·k–î®ÒwiúÄ„¹šìÍ™r" Î?¶şKgd   Á¿}pî¿e­‹C]   l^  éÛ/`&?7@€Dg9Pòb&7’½Fs—ƒN™LGSé(o€ÃŸ<—[€Û ÜªuÇ¿ @û€ø ËÙ€4 ß2Şw @¤u
+<   Œ
+u™Ä¿Å@m¯`çşÿ¾ÌKd–¹ÒqŞ‡APôĞÛîE  õÏm¨åù5s4   à¾İQLogî(  ók@f¯W0   €à  ¿Ø êXTÁ ^wÙVìbæuú’5w9”Ê)Uí,úEY ¬«¶	Oöí3 c<¾¬ÄŸ €æ8 Úäsí/ ÀàËø    Ô_°—¿»ÕHûÃ,·|ßÕ¬‡ŠÙ´AÀKÎ„1€A~|IÈû:©aÙ ¨Êÿ's¢pV²c ` İ‹û% €y~I@S0:O“¹Û‚ÂÛ·¸C1tfb
+  >w9Pò:•Şw—­Òªé@è4Y€f_yqóíìuùË Æ¿ƒÉ»€¿õz´É'ÿ àY hçºg 8÷   Ùö¶4?ù©µR„ÕÿûS%s+ èk¹œíK vÕk1 fmöxuql!  	8Ê@I‡…   à_Ã €€‚±°ÕyıD JÉ÷G- Îì+p3 ^wÙ6ü"æuºGÜe;a“‹ÁÜ…¾%31ÿóÄŞ¦78 —C?LŞ  0ùÓèàáU`òµüû ˜ ûİSà_    ù«åuªGéü\Î¯F@‚!Grˆ @jå/^îj`ƒµ‹«’ ÈWş‡ı ø—8	 @    [  xÔ!@ÎÑÏ‡×öÙGrÂ ¤G!Eğ ^wÙ&ò0±ı˜v'üq—í”Í¦"îNG™qèß_¿Àêwûkõ® §Œ°iŸöß¿ (}‚º{t@ å~€LŸ |'   *GGnÃQåvèsï]kÀƒø¶@¿_§Ë~Îö  àg±~½¿ ÄPp;lĞ¯$À ÃS     ³¾× `i¤¤…j=HŸ[3Ít° z€ ^wÙÂü åÍ¤ïÔÛåP)§TĞQj 9ÿÚl{â « ®G+ş `ü½7À–ï<€4jàÇ¿+ @ĞLk€   Û»%K¬ÿeÿbiŸ¡‡ÛÇ›v¥ù¼_z“ ™ı  0òDˆt ÂÆ*@>%}  …Kİ6WF  ñ  0 À´< €ó‹wÁŞ›) A±ü ^wYå*:_¹ã.‡:c*ºRL:È› °>ÿ&ÍƒóSt€>¿À¾v|Ü  ß >`úû½q‰ üí    LğA­b[¿¤oî/şµøiš2šD–¯‰U €ŒjlFTé  "ŠhaTq±¨ê1j\öÔ+ ü_¤{      w ıa€GA  ¸Üdû« wÙÂÔÅèòw›÷Zq—ƒfÌi:äÆÁíÀ&åÉ ÙÀß›¸ ¼;àááài “[   ·äó•›Zœ¬z÷‹¬ÅGSíÛ€|Ô+Õ ÉÊ…££İ  @¨`î§W L£µar ÀøĞíû	     ï._Û;uó©e{9k…9w€!”… °¸}o^wÙBÚa72yfÇ]¶Kíâf7/6É8ôñ7°–§ß€¾  ï[xp À®{% Ó¼ O 4 1@¼    ²ª,ÌB[%Õı¿®|²öŸÆ ‚wóW4 Àti±¢åÛS °lµYŠÀØ=xs¾B   €	¯  >É$@‹xü©.U–©şšúÁ[À±æà ^wYÅÚaúúû”wïºË¡Y!MÀÑA2ûë1 µ™gn 1 zùÆ¦ÿ  t0Î?`ày ¿ À€  @4/›fYøWEšfçûå+§ ¨ö[ökŒ ÿtTüï@  „–gÑä§+ ÀuY¼‘„ëï=     ©¶®ˆ _ĞãKsÒû1H (ø„ÿ@	‡ 0€ôñ
+€^wYyq½ı=…§ìºËj©LbB|IG™q8íörî?± Ì( `¿Ëñj  è³	 í{$ " ˜ Ï‘3 Œ×@   ¢×³TN«öòB$zeÉÆ ÷·Pàpä „@pâ/®€î*…. ùq     @:u  H¶¤(üìÂ†æ²
+#ı	0  L^WY¡ìb·s'tJÜe+‘‡©¸_i’q°>&&_ËâR^Æ¬®Mú ñhr: . L4Ì€ëª§À«    íê²ÃÖº"šş]*Óuj â7úz9{ñ BÊ]G6"Ú	‘j5/   Xü|W  ¼y¿oïôÜğZ÷Èİ³M¡ÔõåÊE”û—  kş  `  ~wY%Úi5^vÔ]Vš¼¸	F\@ı×6&_ÍG  †€·
+pœ bøñé  3  /{ ?   `÷ènijıü»©DB_-NæåñÈ¿—ËÉ¶(µhŸ €øÍ¨ÖÃ£¶İ @A¿6½ß $WŒÎ‚*`âm      q  @×$šËMV   |wYÁüêæµèözù1wÙ´ÃÍ˜ÏiÂ8ìÓĞr;?ó é Ü>8"¿ì  ˜ük€¸şœÄØW â)P
+   È­E\^ÖÈQÆy¿Ñş. øé¹l! \d¸›—|  °²ó+ ïõ¥_FHqg  À €Ÿ;ÌÙÍzøËş)šs8}ïÀ e  ğ€%   à'W ^w™HùÂ­Û¼ˆ÷ê»ËÖlÍ©“Agğ“à+_)šÅ¾?nw^ 8(ú  Ëõ‘|Àåv·€8ï{,€˜ Ş9`ñ€   \ş¹ùO[%	8ğİ  O›S†@ÅÔ>–|ì=: ¢Ú>ãm $¹©oğò°!÷       tÆÚòV,\|µåœ ´|×² î¸Ç^gYÁü°šùı3îrĞ)‡	R<>IÆÁ~µ
+Ûİï Ö ü¹9Í zjÀÀDÍ À, Œñ”[   Y{[ò:ÃQ/S.óµá* ªÎĞëI0 X:_Éiÿ_£
+ HõEÙÏ)€(’[_5§Š f%ìG    °úÜ  ^¯H+å…íîû[¢ùR’ô­‚P >02( ^wÙ"Æd7–`ò¶ï.+óH‘®dœ0cÿı¥–±öP;‹ËŸ €Ÿ>À0N &ŸK Ì€ñ:³ Ä=   Icª†«ÚÊ"ùÓtÿ:×®uc°NsÙ@w{|!t¼y l`#œÓ  ŠÖ²³É	@>    €Ú  ÿf5 Ø>ØÂ_Ó¹ş$¤ä€#š}Àü  ^gYEö¬®ÆB/×]¦¥q¸	ãhÂ8˜ıuƒµ<ù@, û†›u è|`üòÀ€š € ğµ‘   €NõüØMÂ^yÇãJğò­vÿ,  RfÜy \¬§Ğ¼æD P #Vx}äÀºn@GZ"     ú=  0öı¤cãõÖ-üóW‹Í@uú¤Tàÿ  wYe2äŸjçoíºËJ§®#,:
+càóÀÂsÜ€ ×¦yØ'  ¸¼Ÿ€ìŸ0ùŒW ÂÆ    rùñ¨äõÕZRUÍõ‚»Ü¥®ˆbô^x* ƒ!{ç{|sĞ-"  `\›5d¡S—ú·¸xÅ  Ş¤íÕoÉ=÷O§>¤yô™ `@Í0P @®Gq+   €íL1 ^wY‚™Ï¸×®»L;ãbfÜKiÔğÚ· {¹Z_ ì`åï?  w€ø—çI â)0   \ÈgáãŸ/']«´e¼ïÚî~}êÿ—WÖœ¢ š^ÒßÃôğ,0   ôN.Ü ¿‚”
+ÿì  €„ÂG€!Yä`ÀÒ×
+‡0  ÒŞ|Óà0îCà^g™"kBoƒçş?Î²İŒc8~%iú‹?É}Z@ÀÏ  Ä+ >p®û L Ò€0 a €ş…H‹•AóOEİÃöÎÒ!U¨ıŸs !´±)[%Ìß$ €"àú\]ôK°A;©° M»    0¨y¤ ãË·æíM<3Q ÿÒ @!  ÍÇà
+Å‡`^w™ c’9n»ÎrĞ4†K9ù`²	 ¾®°´gÿ4 BÀñLVâÒ °Pğ@âhˆ§ÁB €Yîiñµ–ÛS‰GSZ\±D:ÖÄÁ’ŸãĞ÷PU<»¬‚0€½Ò7F?ıß2 ÿ O|ûû0İ@xC    àº2¶ œº;½     /¼l€@ÀLƒL\m€ßÀ ^g™2­ÛUHDwY•#M¤—“ßpşÇ ‹»ß€øsœq5  x¯o€ïP¦	€Ç  È¢TL–úò4µ‰¶ä®ç¾maµnhC@™ÖKD„ `±º¾6YÚ»˜.  @Xÿ4±ûe¾C‘ ï\±  `ş! Áş  è;ïî  @U €ÙT >gÙ6’q{ŠC'İ]Vçì&œ%’eÖúéör};v L  Íÿ<¼O0Åj r@  ĞUÙp–§İJâ×°Dš¾Î Uæ¹AgïÇì dAúğ>Æ\÷÷^NÓĞİúğ@   sÒnø§¯ñ_Öï ÀeŞ‹}À×4Ç)Ps
+, úÀ `¾âò €®@ >WYÚäzûñh‚ºËê¨LE×ÍËI—ìå¯ `$ ×ƒÃYŸ  ÿnÑˆ[H±€HÄ1  º±ºêÊ,ê9~ù¸5û „*	ËKQ  6KŠ¬·Ë®zÆşf»M’`!>r,¶×'w    ø&2kÍ Ÿ¬WK4mÉ '  `@   pı„æ OggS  €     Ä\D"   jx|™¤¢¡›’ ¦¢¤›œ¡›¤˜¢«œ>gYUÆÔ-Y\Ö³l5ëâ*Ã$Ã®ó}×°¹€Àe2  ş¬w à„4 Š¾D| ÷ Ä @Åw¾íë–oj¿Gã¼+ehs¶‚‚jp8V `j­àâ§– ,ã]Ï ¨èiî÷ëîa €½/ Ø|ÜO    ¬j@Ø[ëü)mO   €>Û¯?  @À   wYÆÔîuE(î2Mµ‹™8%’M ğí•$÷z 6 «s}õ  ß äÀíš 9— ˆ4 :ÀrßÀ   ôº2›	Õ¾~ÕR:ù·u38UÕÉ²æö‚«6 *X6·  àO¾¾åße0 @Aelªä°véuÛà—    Ø½ü áÓWË4æ_QP Ç ^Wéc25ÿ<zuİe:G1SüÊ¨Ãúş·À3nÀ à:Çê|ş  Ú= =ä§ÿ €HÊ, ı5@  -oSMİŠ2¾×+—5Œ€êæıÍDØ òè;ÏlF@qfKÚ †.Áßa	€   0 Â½_ÀÙH€g}ºÿ5o_i[Zº@Pt |¸à¸  (w™*¥›àogwİ¥?òÙM‰´1X¿'¸§{Ÿ€ĞL
+ ö€èG€8Ï»H¾ öí 0  ş[í-?1ªŒİš*Î; ŠšcÖ
+ „õp{‹%ö®Ü“(è£ÑŞ‰ŠtÖÁ¬]DÁ‰Ëu   €ÀĞÛ{¥\»äËû[¤g l¾Œ@ER(†w ^wé•ÊÈö‹İ0ß.[‹q¤{!F«	 şZ;Âd»îÇ ‚³øÌ5  #şÌ ~@^{Ò|€Ÿ  J2¦   `>½ñëéõ¢.£²œzŠ²ı¼>Jûæ(€Š¸J+§&Ï  0Ğ³¥L 1v_êB›·º `7·©   °? @+?€È˜?7¨²Á”› QÊ0@à^wé¥Ö5Šv‰©»¬¬©˜),ÒM h—ÿÑ'¬µŸË ş– à9“ xíø€ø;h`òi7  ÒÀg ?@  HªÑÏOŠToª©¾x‰vïª4W# øMœm P:Tıõ¤À   ĞwÖæşF€ØqêğÔ³[Æ     ë¢w €Fà¡á3) ¹p0™À
+
+€wé§ÚU›óö‹]wY™µÉT
+“t Üÿã“Û	€ì µUÿo ÀtPÇ y ˆ4 ¤À£
+  ²q×øy± 9Q9äğÈn¹Qı~]?wt°Ú-î\Çn1 `~»ëS7   l%F „Ê5mŠÒ:ÿµ, À   Lîº  âöşk< õÂtAP0Cà¢@<` >w™¦Ú!æ4/±×(î2mÚlfšOÈj€·ßŞ'øä|ûPl pÙø<  ¼à~®çã“ €ã)ğ  ^Øñ:İZh'·ıX~ŞSG
+ÅÅ>x PN  È#Dz¾“W    ä§y °q¶¾
+ vØ     Àƒ€` °ë €R    ¾.>€	†	wYIµ9U>Ü^”eî2-­#]¤±ÂÙ±@Û¾iÁZno d
+ßôµ  úË@7@€Ï¹n À1ip!  1ÛåßÓ¶zêÛ^qo«× 8ny ø/-V÷›Í    `áô'U@áåæ
+ €w  Ô.  € hn ÛËÂú1ìX8
+ p   °~e`À „Ø-3wYiÖ¥©ññ‘]¥ÌYú£q1ÁA€‰ÒÃùùyŒÕ¼àu;øÚc ÀiM€Mÿ{9 “ç(½„  ä‚"¸]ŒÎ§{¯šõe±§èq¡LÒ»ÄÆkÈºÀ€é¶¢÷ŞFa €BöşƒµäÁÒ‡Ú46 bøk	  0öwÈaõñ ı(\Q   ¡Wä‡2@€wéüŠÀ:¡:Ko´/¿2Ñ?àÏï`/O?Ğ ŒOÇäı°ğıõ†šóçki.» ÙY Í=  @Û©ÆÒ°ım<ş§oi|± íâ«á¶ €!,ÈÎOÖ…% a±ÍŸ±?²ôúI“@ æ6 €»³_À¶12 €¿ÒË€m ‰ùı7£ ‡Ï$
+’: m}Ì@ (>wéw8ÜQ¹q—ŞÈw¥ød€şë OîvÀ ¨}N  úàái.àÓ~ PPRà—  0^9g²c)õD5W¬·p1Ö¶9^¾|l»@AkÕ
+xøÙû¦TI—?¤§    í ËgU3±‹ìßK €ıY   ¾Ÿ- dŞÕ` `~ã€”Ë,©+^wé•Æ‹›ùÉºKo0.€U$ƒgŞ =·ósn V ç¹±zöÿ  àà˜<@i€x1 ¨°§.#ùé9¡ jtF ²¥¾ÌkF   =ùOş*"8Ÿï»½m·ºz›Ñ†    ğº/  tss  ¡~ãé?êÏG?P`$ò^¨€€Ã
+@ˆ)&P gY)åQLşö«=æ,ÓÙy+FÀ8ŒşÙVn  ä«¬ş  Úñ4j0ğ$€ 8!   ×-V³ûKOeíªéb}¨v @È6T  ¡<dõ@Ç   hîi¹R3´mYÍb o|a    â~]°8o?iÌ[×ñ@  ¨ÃëëV  L§ w™6ev½ı‚jÇÜe2Z=Ml%‘& "æö×ú Ê°¬ÆŸg  Ààa!ÍhDPMƒ   ìÅ‹Àœ©"¹N%6}W]Û?)yW {I
+ 89ºq"è}¯   ¢¹£Ñ‘`¹wµüÈ €6?ƒA   ¨÷  ßö€S˜ ë    \B1 gYéØÔL<^jÇœ¥W‡Ã•ˆ4¹`=rƒØnG  MM à66à!&2Š§Á"  ÀÊ9äwë!"^İ~²«š8<Ûşv®hss20€ı}?ËÍŞóÆe¶6€  ‘KMË#D¦zÕ$   ìŸĞ Ğó} ÇbI €  „u\|´®´F9¥œá€à wé•ÊQLêfÙİ q—^§]\­+XÙ8äO¿Ÿ;ÍƒóõûĞNE€OÎi³~ Àòı§(H0ğ$ ³  _„@ h]ø–î»È@>d™òÛÀø…,| €ï;àğG, 8€·vŞ„D>€(È/&~œ   ƒ{R@jŞûÇÖŞÖy@Ø8 €<và«àLÑC@†@0 ^w©œq˜ª—Èí]w©ça&†HÄ8ÒóßéÁİoÀØ¦›< ,x8À€†˜4x   ß¼÷Tİº|kÙs>%q¦“ Š˜ÛiQ âägÕ!×@c$ïâÊ-º„Æ³“ĞK   (& 0TuÃÃ¬×e1 ·/¹ƒRx~õ °    âñÂ^w©Œr¤¹ü‚bwæ.¹³^q°C
+Æ0­_×'XË½Àš Ó´òşÛ  qì 5àĞ@|Ú_  ³  ®™   </·W6Şì($­—Ø÷@ÑUpSe)$À\nÌ×’póS   òúò…_ ”ÚÔ…V@„à ú	    èçœı¶xÚ"*Ö  ˜  ¾ÌC üAƒ| ~wÉÆıâ¦ò×Øi‘ºK,í‹rp†+¡Øàğ°œŸÕ G_ èçvğÙw  ÈÀŒïÀ< „™‚  `‘O¡¥,Ò¯á6ëß¿ˆ´7|ÚLŞm@@Ò„ùéŞ{|=/jV   òí¦çûZÀOWı6ñ<ç     öúŒ1³ p€‚äùøGp€Ã¸Áwé;{6uüD´;Î2™µÃuvÈÁ8šxt°—Ç	€ Úëei«¶   ß>È}Û	0ùZ~o €4 # @!£Wú»ä¯¼òÚÔkĞì%Ö±	@ú?á<¿Úÿ3€  zÀß»“G½viv06¼—-     €íaI¢ª õã€¨ÊI ¬bÀ À  Ô›0“;@3 l >g™8£µü%tfÜe²¶§â`{9§±~Ü{9¯É Ë |pˆ¯ Àøó×Ÿkâ|¼  Ò€'" äOùÜØò™ªf•©É üÓö Üß3ô˜ô§z ! ÏI›» „{ıcİù     x›ß.uã³šõİË`ŞŸ` ©îQ 0P×À¢€qÎAË¼]†c(^gé'VoªúÈâ¹K¿³pUŸR*bô‚~ço 2 À/ìEü  ô ´; ğüHÄ‰   OrÓŒKıôø4‡>·÷9n À{š©` ÀÚ!Á~Ë[ Wó½2I  µ¦–# >»4      ï¦ÚoŸo¿šO| 8  Ğ†]psŠ50a0˜Àú ü ^‡©söÛEtfİ¥nBÕSN™š °¿/ğlqi S€qí8Ä  &ÿNÔÀ	 ñ4HÄ‰! Àî²Ò³ıİ·n¤~Xï[¹]Œ‰z‡MívI“ÀtÓ›çc KÇ¯u€ l¯'t@ ½›µ àp˜K     ø§»´€8  ¸úøÿè øÏ"œ›  6À¤f ^gÉÄz±;5†ÈNgŞ]òè©bb«CO€éùq5¬¼[oÏ0& ÜàÈõï  À¯³:à>×0QÔ ">€; É…5ÏéüÂo3vzÊ©;ØÒ¦@/Å]Dé8K,¢Ğó   ıÎ .Úñ,*­ß  À Üõ° ZcÑŠæ 8  €E/Q`›r7
+W¤³çƒcŸEÍ´EAØä^g©„u@ùO‰î5W)‚{QN¥ŞÙ
+à3±Ü¶Ç€H È¿‡u  ø·~T w Š¾ 0¤‚ €M1_qÚoÿš^®rd?mVFº×)¬qş&ˆĞÀ½" úBş7   ,JWí6 j„´xVP¸¾Û  0€ û@¬ 
+"€¯ı¯pŸ«s… 5è],@OggS  ;     Ä\D"   b ó¦­œšš—Œ‹– ¢¥Ÿ—”Ÿš“£˜•Šw8>w©•6ÛEájO¯5w©‚g6Ú><ú·1˜n?í	iß?`—ğª5½ à>äÀu®q>ñI €ø, ¾ˆ0  ½Çó¥\{ËÑíJ¯’xÂØ@y™Œ, XÜ¾4Æİ“£;
+   @Wrô|ÓÀÑT^·ø¬İ   € ö€ÊÁo;ï±äkŸ  `  ¸¿ÑœƒÇ1aLüPÀôÜe´
+ wéq§&ÉÎ»‰Õ¡ì-¡6Q Ãéy„“{½bÈ lÕÙşL  z¼çßPğş`¢Ü€x<!" ŒÌ×K×ı=1\l(˜ËDÛW¥‰Ì™ÖŠªJÕŸúWé <µıÙªÊm0 €Úö§@vp~™`"şÄ—   ` [ú_ïïØ¸S @  İßÕpqŞ•á9GNÍì=/=Ì.€Ó> ^w)Œs6SùKhÉ»K>:«2†cÖk ËË¬+€
+¬|¢ à¾à<Ÿ 1b Ì ! Ú–Õû7æ\¾½5ÇëËkqÛAÕTí1ı`À  * Ëîç_¾£ È.Ó×@³»    PÿgÀ—•E Ø{=o£š‡B ı  ğN æÚp	 70p ^W©™=åUN¹Ö×]|§D%Ä¥Dlü°¹ó@&à£© LO€¸M`¢ @)paD @;÷_Ü—­*õµ‹¶Íc •0o· "_Oì^wr¹VË  òĞ«–†tªÀÖ~5´xsö      ş· 0F€-¿ğÀæM Š¼ ˜&ğ³Ñl8øwéw7’m×]bjWÑã-G„˜ß´ û½ ç¥ \¶ş @€‚Ş€œO  ¤DD  uzë?jÚó:('—H‡©~#ıĞ¯ ˆ.İ¿~€_,  €`åqk‡ÉkàÅO"jÀ Që    0>OkCãz÷—­ğ*€€ XüxMà0@›œÙ
+ (eĞÇ8Xà wégôkG¯5wém,Š‰!B múá¿Ÿ'¸q÷Û 	x²›?w T‚…8Ïc0à	&" Àˆ~<½C#ŒU>Û!^Éí¨1ŸÔû&( HHkŸèV `¶G‘º®×—ÁÆ€@ˆø è Às*5(u4iÎ   Øé`)ÆçW  à‚P ]°û
+°óÊ9pÆ±s Q^w©ËÕ…êa{î’gE‹ÎP‚1ğWàÑÜyœ d aÛç;X  / `
+L4Pœˆ ™ävI—c¤’{nfv`3G^ó*f_²L Åï»½ıç{€ŸºzèÂ6 êê.şÉ1¤MŞ}¥;…|¿ `Ğ?§Ë   Ü*  º|.ƒa'@€
+EÙŒá`'ÜÂ>w‰Â:DõÄİ4wÉ³¥Ä„¥Ä­×À
+ıË£í  ZÎ pÿt æi@’€ ¯½t—ğ§7&ÚÖ~ÅÿÖÄ°ß,Ôn£àYòÍºO  ıæù,°^(‰#0s1  lŞ£Ëß}·1’ [Zş]ãTÈ à&  ?æ¬ÀˆÃ>w)Œ=‹É<:sîâG©ÅDQ1!ãàÇùö^öş9 m4ÀT<¬#  òü×rı/˜< ñ8   (^ûí^î"BÍfıî	 äF±– °ÂßáW/Ò(   l]Eÿ€á¨©å€»àÒ    4lßÛÇÀmô €  @€ÿX  új >‡ÉÆ:ìö¦Hµ3š»øE"&šCãàş7kÁ¯“iÀã ğ·Àğ. ô•ğP­! 7şv €4€   évaÚÎÃNuzé©÷’±Ü¬¾.m Öy’§NÖšÜ   Ç}n@{üÄçî¥1ƒ     v ìËÓ‡î¯A‹hn­
+  çg ^g)çQù(Væ.qtvqa+12ÆoU»Y?ß" àØö³ zäÀ~|öë  Ò DD Ğ–‘ØÏi›Ã»7‰×Û¹Ö@@ë/. ÿëâ    ó/}× àil®q    €ß¦ €Úzrÿ§'kEÂ  @Ş£ÂÀA¹ØÎZŠŒ g©‚1¥^ŞvŞYüàÓECH m|Ş –Î³ì 1ë }¼±Oşw  w
+' Éçœ+  Ò q"" À ¹ÿ¶{â±õÎİ%WXiÌşnzS`¿jŞüğİQo-    øSÅÉt ĞZ¸Ö Z     B¿MãÖ
+€ 8À*@ €í¿Ú1pŸ#Qƒ»À³¤`ö€>g)‚{ªİ¢=-=g±fšŒ3é…§CnçögìzÇ  =ñy,  è÷(xU˜|ü Ó$" åadä¡%ÂFÈÛ÷X“K ,ÇL< áÅ‰ÁÎ†€B  <SÇ-¾íX`ÒÇŞúŸ £"   @òÒúY÷¾ıv0 `8@@ÿ¯'T7AŠõ,JKôç¯©ÔB…%0¹â8P >g)”sFÉöª»øÑ[#ÒäØj‚ŒW¿}›šè úì+>÷ €1İ >p»öP| Âl  €´Çğ&cßt÷U]Ï²9-,º¬Gx{GtA4sm9Ç  Z_fĞÑ¥‚§    rÚlÙ­ À“ÿ)í 6o^»  €  çÂÌ“* ßŸ`à¡ÖÀHQL ¶,0C>g)÷ljyG‚*&s—bí¦dicà«tÁÔ·u|tĞÄsªà8¼ç  ã_nÀÆøu
+Ã“ `“ˆ àL×•»Ú¡í•6´jìc[ ¾ê|¯  èlãIEqŞ    ¶Ó{a€^	ûé	|zÔ3  ”ËÃÚ·xùğ® X? @åfr[øØJ>s<`˜ø€^-«ÏçÌ>g‰©}MİÎís—Øycb¸%ÄÆá´ÿ°İ‰_`1½4 ¸–Õ~¼Z  pÛ rh¾? Š )‰ˆ €U+—»^WJ’E.€²÷yéûl Ãœ½sˆoÚÆ    ºÈWıhxÒ: ì]Ş   Ö°¨ùóğ‹.ø Ğn0à_Ü1î!×ï (6³€  >wñ©ı*bxB„dİE–Ş û-ãĞŞÿºÁ'×ã2 X4 °O jà´ h– ¨FÆ_˜å­´{Ù«”p¼=É®ä8÷í}óò°(“ jx‘÷) ÷–†­B \8z÷'s§ @;ÃÜ›ÁHÂG  €ïC  ıLaÄ«œ äŒ  ^‡ÉÍ}q:~¢É¹‹íœZ†ãàöãò±<½5 7 ÿÓ³	€…ëçøÀøÜ¢¾l0‰ˆ @)ÊpSÃ$§ò—BïøLÔ
+ıšÃ Õò¨æ¾UX  Û»úV†l 9]ı ˜Û0   ’Ïş»mşXëS nŸ ”	€Q ÜÖ€æQ+ÁİJ‡q
+L¦æ„ >w©gÏQT_àXÏ]âb!*MM PøwöXÎõt€ŸÙG`ÄÍ¯g Ààı¹~ 0€¤$" ÀHó“))Pò	¾.;ªŠl¦Ş÷l™ŒĞ4«?€ƒb"ÌëÛÿL  €¢]š.‹tlà—WŒîÿu1  €a> 0P  Å¼šjñûc"€˜‚wCo“9 >‡ñƒv¸^îpÅdîwî(tM±1´ü±Î	ìåv ÅğpÏÈ˜\4Â41 àTúª. ñ?HŒ?y :<=¬¹€&¾úQÃædwL `BŸŸÓ•€•İY ªnîÿQù¼£Ï_ m_a¾0  À	 ø'@ò~5‚¼{2`ÀPˆ^§ ^‡±³ç*:gÁİEn|´ë¡hcb“¯Ÿ|-S]… ¼°ê·8  Lñøùİ) 4K""  â¹³wîFâq«¼ft«ƒ²e@•€ÑÄ" XQ%ç~<ª± ¼)Ş `ü|  Ì¿ûr}À% €úÙÄ¿õ   ÀçıîÀµŠÛ7f˜y£á¹v †ÈT¾Ì‘ Ğ^‡Ñ£÷ÕíVbTwÁû1D7Á¦Ú£ƒ¯îq`w ûµ°2½ @œ&€‚H4Â$""  Üğ#½eÕû‹‚m’ÓüanAÙ/İ. ¦®÷‹  @ó’ãĞ´H   W{  İ“Û» ÀÛ (Ì_·    n¿¶¤|Ç×ŸÌM=ãA¸Y€ÒHå1P ^‡‘ƒÿÕíŒ,ë.tŸU7á‘#ãàT²aìmê£@ ç¯…C¿%  ãßd(
+€0‰ˆ0 Œò+}Rc IÇëJşåå  ½O  €!Ä¿‘<Ÿm  €#Ú `/O‡y2 ¶   `ıj]= ±€@S<*ÃŸ‹L¯£à°æÓp”Á ~wa›ôj^Ì¢8bP‡M -cdôû€5¶Eû F.&5 8ÏªÈëÙ É»M€Ò DD š—µüa
+yzÏµQ÷ Àò“ƒ¸Ü?  `qÊ¬«7  ŠÚ ¾{“0   ‚/  Íğ¼àúà– 
+ ,W7§3“pg€Ã1½Âã  ^‡1ëâ% !Lê0j]vñpŒÙè5Ğ[[ƒ¾=Ü  mß²Úä#B€È*ŞúàR)Šnüg\ö®NŸ N:~úÑhq[ò   RO£ÿ \¼ü` Àmói‡H¹}=PÀ\ºz5  Ÿ €0èÙùÁ§X@Ğ3p<à  ~‡)‡ÖèîgôZyš¶ëD "ˆÑoçì×_@ßlçÙ Ğ˜a  !Ï÷3÷ÃÏâ~şOß@5‹Ø%É‹  `±èÎ?6Ö€^Ÿóäú<  Üò n\Œé}ş xğó:»(ª€€9P—ù	å8!/óS£4b@6R3        ×·Ÿÿ@îÑ ÓçÛqo  0zß@¥
+ 
